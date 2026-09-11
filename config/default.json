@@ -1,0 +1,190 @@
+{
+  "agentName": "ZZY",
+  "mode": "preview",
+  "chain": {
+    "id": 4663,
+    "rpcUrl": "https://rpc.mainnet.chain.robinhood.com"
+  },
+  "assetScope": {
+    "allowedAssetClasses": [
+      "tokenized-stock"
+    ],
+    "blockedAssetClasses": [
+      "memecoin"
+    ],
+    "chain": "robinhood-chain",
+    "jurisdiction": "EU"
+  },
+  "catalog": {
+    "path": "data/stock-token-catalog.json",
+    "requireVerified": true,
+    "maxAgeDays": 7,
+    "refreshHours": 6
+  },
+  "policy": {
+    "maxSnapshotAgeSeconds": 30,
+    "maxOrderUsd": null,
+    "_maxOrderUsdNote": "Optional hard dollar cap per buy. null lets policy.sizing govern. Set a small number like 2 for your first live trade, then remove it.",
+    "sizing": {
+      "maxPositionPercent": 60,
+      "maxOrderPercent": 25,
+      "minOrderUsd": 5,
+      "_note": "Sizing is a share of the whole book. The model states a target weight per name; the engine adds toward it in steps of at most maxOrderPercent per cycle, never above maxPositionPercent in one name. maxTotalExposureUsd still caps the whole book."
+    },
+    "maxTotalExposureUsd": 250,
+    "maxOpenOrders": 1,
+    "maxPriceMovePercent": 3,
+    "earningsBlackoutDays": 1
+  },
+  "research": {
+    "model": "claude-sonnet-5",
+    "webSearchToolType": "web_search_20260209",
+    "intervalSeconds": 300,
+    "maxCandidatesPerCycle": 6,
+    "minInterestScore": 5,
+    "maxSearchesPerCycle": 4,
+    "timeoutMs": 240000,
+    "_note": "The review is the only thing that costs money. intervalSeconds applies in regular hours, Extended in pre/after-hours, Closed overnight and weekends. With skipIfNothingNew the model is only called when the inputs changed since the last review (new filing, headline, note, cash, or a holding moving materialMovePercent). maxCandidatesPerCycle and maxSearchesPerCycle bound the bill per review.",
+    "intervalSecondsExtended": 900,
+    "intervalSecondsClosed": 3600,
+    "skipIfNothingNew": true,
+    "materialMovePercent": 2
+  },
+  "news": {
+    "edgar": true,
+    "edgarUserAgent": null,
+    "lookbackDays": 7
+  },
+  "treasury": {
+    "zzyTokenAddress": null,
+    "buybackShareBps": 5000,
+    "tradingShareBps": 5000,
+    "minProceedsEth": 0.01,
+    "ledgerPath": "treasury/ledger.json"
+  },
+  "pons": {
+    "locker": "0x736D76699C26D0d966744cAe304C000d471f7F35",
+    "factory": "0xA5aAb3F0c6EeadF30Ef1D3Eb997108E976351feB",
+    "claimThresholdEth": 0.42,
+    "claimable": {
+      "abi": null,
+      "functionName": null,
+      "_note": "Copy the creator-claimable view signature from the verified locker source on Blockscout. Not in pons docs. Leave null and the loop falls back to detecting WETH pons auto-routes to your payout wallet."
+    },
+    "claim": {
+      "abi": null,
+      "functionName": null,
+      "_note": "Copy the claim function signature from the verified locker source on Blockscout. The loop refuses to claim until this is set."
+    }
+  },
+  "uniswap": {
+    "routerVariant": null,
+    "_note": "Set to \"SwapRouter\" or \"SwapRouter02\" after checking the verified source at robinhoodchain.blockscout.com/address/0xCaf681a66D020601342297493863E78C959E5cb2. The signer refuses every swap until this is set."
+  },
+  "execution": {
+    "slippageBps": 300,
+    "stockSlippageBps": 100,
+    "maxTxValueWei": "0",
+    "tickIntervalSeconds": 60,
+    "maxPoolPremiumPercent": 2,
+    "quoteConcurrency": 8,
+    "tickIntervalSecondsExtended": 120,
+    "tickIntervalSecondsClosed": 300,
+    "_tickNote": "Quote cadence by session. The stop loss and the dashboard repricer run every tick; slowing ticks off-hours cuts the catalog quoting from 275k requests a day to about 60k.",
+    "cashSlippageBps": 50,
+    "gasReserveEth": 0.003,
+    "_cashNote": "The book's cash is USDG: stock tokens trade against USDG on Robinhood Chain, not WETH. The trading half of each fee claim is swapped WETH->USDG once (cashSlippageBps), then every buy is USDG->stock and every sell is stock->USDG. gasReserveEth: the runner warns when native ETH falls below this."
+  },
+  "runtime": {
+    "watchAddress": null,
+    "allowedStockTokens": [],
+    "_note": "watchAddress: your operator wallet, for preview mode observation. There is no watchlist: the agent watches the entire catalog."
+  },
+  "site": {
+    "twitter": "https://x.com/YOUR_HANDLE",
+    "credit": "Launched on Pons, built by Ozzy (MeadGod)",
+    "creditUrl": "https://github.com/MEADGod/ZZY",
+    "pollSeconds": 15,
+    "repriceSeconds": 5,
+    "_repriceNote": "How often open positions are re-marked and data.json re-exported. Each export is pushed to the page instantly over /events. Independent of the trading tick.",
+    "serve": {
+      "host": "127.0.0.1",
+      "port": 4663
+    },
+    "push": {
+      "enabled": true,
+      "intervalSeconds": 30,
+      "historySeconds": 300,
+      "cacheSeconds": 60,
+      "_note": "Pushes data.json and history.json to Vercel Blob when they change, so the static site at zzy.live updates on its own. Needs BLOB_READ_WRITE_TOKEN in .env. Worst-case staleness is cacheSeconds plus the page poll."
+    }
+  },
+  "exitPolicy": {
+    "minProceedsUsd": 5,
+    "estimatedExitCostUsd": 1.5,
+    "cooldownSeconds": 900,
+    "maxLossPercent": 25,
+    "minTranchePercent": 20,
+    "maxTranchePercent": 75,
+    "_note": "Deterministic guards only. Exit judgement is the allocator's (see research). maxLossPercent is the hard stop; the tranche band clamps how much of a position one TRIM may sell."
+  },
+  "prices": {
+    "path": "data/prices.json",
+    "maxAgeHours": 26
+  },
+  "profitPolicy": {
+    "mode": "threshold",
+    "compoundUntilUsd": 10000,
+    "minSweepUsd": 25,
+    "sweepShareBps": 10000
+  },
+  "paper": {
+    "ledgerPath": "data/paper-ledger.json",
+    "positionsPath": "data/paper-positions.json"
+  },
+  "control": {
+    "port": 4664
+  },
+  "fork": {
+    "ledgerPath": "data/fork-ledger.json",
+    "positionsPath": "data/fork-positions.json"
+  },
+  "positions": {
+    "path": "data/positions.json"
+  },
+  "decisions": {
+    "path": "decisions",
+    "_note": "Public decision log, one file per name per review. The site reads this."
+  },
+  "notebook": {
+    "path": "data/notebook.json",
+    "maxEntries": 20,
+    "ttlDays": 7,
+    "_note": "What the agent is tracking between reviews: names it is waiting on and what it is waiting for. Noted names reach the shortlist without needing a price move first. Entries expire."
+  },
+  "earnings": {
+    "path": "data/earnings.json",
+    "windowDays": 14,
+    "refreshHours": 12,
+    "_note": "Nasdaq earnings calendar, fetched one request per day in the window, cached on disk. Names reporting inside policy.earningsBlackoutDays are dropped before research; every holding and candidate carries its next report date into the review."
+  },
+  "social": {
+    "enabled": false,
+    "handle": "zzygodv1",
+    "model": "claude-haiku-4-5-20251001",
+    "safetyCapPerDay": 60,
+    "softEveryHours": 6,
+    "postBearish": false,
+    "creator": "Ozzy, also known as MeadGod, the creator of Pons",
+    "dailyReportHourUtc": 21,
+    "logPath": "data/social-log.json",
+    "maxChars": 240,
+    "_note": "ZZY's own X account. Anything that actually happened posts as soon as it happened: a settled buy, sale, rotation, or fee claim. No gap, no daily cap on real events; safetyCapPerDay only stops a bug from becoming a hundred tweets. Soft posts (review notes, thoughts from the notebook) go out at most every softEveryHours when nothing real has been said. One state-of-the-book post a day at dailyReportHourUtc. enabled false = dry-run. Credentials in .env. Never posts from paper or fork."
+  },
+  "history": {
+    "path": "data/pnl-history.json",
+    "liveMax": 720,
+    "archiveDays": 30,
+    "_note": "PnL time series behind the dashboard chart. live = the last liveMax exports inside data.json; archive = one point per minute for archiveDays, served as site/history.json."
+  }
+}

@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<title>ZZY control</title>
+<style>
+  @font-face { font-family:'SF'; font-weight:100 900; font-display:swap;
+    src:local('SF Pro Display'),local('SFProDisplay-Regular'),local('SF Pro Text'),local('SFProText-Regular'),local('SF Pro'),local('.SFNSDisplay'); }
+  @font-face { font-family:'SFM'; font-weight:100 900; font-display:swap; src:local('SF Mono'),local('SFMono-Regular'); }
+  *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+  :root {
+    --bg:#000; --bg-2:#1C1C1E; --label:#fff; --label-2:rgba(235,235,245,.6); --label-3:rgba(235,235,245,.3);
+    --sep:rgba(84,84,88,.65); --fill:rgba(120,120,128,.24); --fill-2:rgba(120,120,128,.36);
+    --blue:#0A84FF; --green:#30D158; --red:#FF453A; --orange:#FF9F0A;
+    --font:'SF',-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Inter','Helvetica Neue',system-ui,sans-serif;
+    --mono:'SFM','SF Mono',ui-monospace,SFMono-Regular,'JetBrains Mono',Menlo,monospace;
+  }
+  html[data-theme="light"] {
+    --bg:#fff; --bg-2:#F2F2F7; --label:#000; --label-2:rgba(60,60,67,.6); --label-3:rgba(60,60,67,.3);
+    --sep:rgba(60,60,67,.29); --fill:rgba(120,120,128,.16); --fill-2:rgba(120,120,128,.26);
+    --blue:#007AFF; --green:#34C759; --red:#FF3B30; --orange:#FF9500;
+  }
+  html { height:100%; background:var(--bg); }
+  html.theming, html.theming * { transition:background-color .3s, color .3s, border-color .3s !important; }
+  body, button, input, select, a, code { font-family:var(--font); }
+  body { color:var(--label); background:var(--bg); height:100%; overflow:hidden; -webkit-font-smoothing:antialiased;
+    font-variant-numeric:tabular-nums; letter-spacing:-.011em; }
+  code, .mono, input.mono { font-family:var(--mono); }
+
+  .app { height:100dvh; padding:16px; display:grid; gap:16px;
+    grid-template-columns:minmax(260px,.9fr) minmax(0,1.6fr) minmax(320px,1fr);
+    grid-template-rows:auto minmax(0,1fr); grid-template-areas:"top top top" "status log ctl"; max-width:1720px; margin:0 auto; }
+  .top{grid-area:top} .status{grid-area:status} .log{grid-area:log} .ctl{grid-area:ctl}
+
+  .top { display:flex; align-items:center; gap:14px; padding:4px 8px 16px; border-bottom:.5px solid var(--sep); }
+  .name { font-size:1.15rem; font-weight:700; letter-spacing:-.03em; }
+  .name span { color:var(--label-3); font-weight:500; margin-left:6px; }
+  .state { display:inline-flex; align-items:center; gap:8px; font-size:.86rem; font-weight:600; color:var(--label-2); }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--label-3); }
+  .dot.idle, .dot.ticking { background:var(--green); animation:pulse 2s ease-in-out infinite; }
+  .dot.paused { background:var(--orange); }
+  @keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(48,209,88,.4)} 50%{box-shadow:0 0 0 7px rgba(48,209,88,0)} }
+  .spacer { margin-left:auto; }
+  .live-badge { font-size:.72rem; font-weight:700; padding:4px 9px; border-radius:6px; background:var(--red); color:#fff; letter-spacing:.03em; }
+  .paper-badge { font-size:.72rem; font-weight:700; padding:4px 9px; border-radius:6px; background:var(--orange); color:#fff; letter-spacing:.03em; }
+
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:8px 14px; border-radius:8px; border:0;
+    background:var(--fill); color:var(--label); font:inherit; font-size:.86rem; font-weight:500; cursor:pointer; white-space:nowrap; transition:background .15s, opacity .15s; }
+  .btn:hover { background:var(--fill-2); } .btn:active { opacity:.7; } .btn:disabled { opacity:.4; pointer-events:none; }
+  .btn.go { background:var(--green); color:#fff; font-weight:600; } .btn.go:hover { background:var(--green); filter:brightness(1.1); }
+  .btn.stop { background:var(--red); color:#fff; font-weight:600; } .btn.stop:hover { background:var(--red); filter:brightness(1.1); }
+  .btn.primary { background:var(--blue); color:#fff; font-weight:600; }
+  .switch { position:relative; width:51px; height:31px; border-radius:980px; background:var(--fill); border:0; cursor:pointer; flex:none; transition:background .25s; }
+  .switch[aria-checked="true"] { background:var(--green); }
+  .switch::after { content:''; position:absolute; top:2px; left:2px; width:27px; height:27px; border-radius:50%; background:#fff;
+    box-shadow:0 3px 8px rgba(0,0,0,.15); transition:transform .25s cubic-bezier(.34,1.3,.64,1); }
+  .switch[aria-checked="true"]::after { transform:translateX(20px); }
+  .switch.sm { width:41px; height:25px; } .switch.sm::after { width:21px; height:21px; } .switch.sm[aria-checked="true"]::after { transform:translateX(16px); }
+
+  .sec { padding:18px 4px 0; display:flex; flex-direction:column; min-height:0; }
+  h2 { font-size:.78rem; font-weight:600; color:var(--label-2); text-transform:uppercase; letter-spacing:.045em; margin-bottom:10px; }
+  .fill { flex:1; min-height:0; }
+  .kv > div { display:flex; justify-content:space-between; align-items:baseline; gap:12px; padding:11px 0; font-size:.95rem; }
+  .kv > div + div { border-top:.5px solid var(--sep); }
+  .kv dt { color:var(--label); } .kv dd { color:var(--label-2); font-weight:500; text-align:right; }
+  .kv dd.strong { color:var(--label); font-weight:600; } .kv dd code { font-size:.82rem; }
+  .up{color:var(--green)!important} .down{color:var(--red)!important} .warn{color:var(--orange)!important}
+
+  .pos .row { padding:9px 0; font-size:.9rem; border-top:.5px solid var(--sep); display:grid; grid-template-columns:64px 1fr auto; gap:10px; align-items:baseline; }
+  .pos .row:first-child { border-top:0; }
+  .pos b { font-weight:600; } .pos small { color:var(--label-3); font-size:.78rem; }
+  .pos .none { color:var(--label-3); font-size:.88rem; padding:6px 0; }
+  .feed { overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:var(--fill-2) transparent; font-family:var(--mono); font-size:.8rem; line-height:1.55; padding-right:8px; }
+  .ln { display:flex; gap:12px; padding:3px 0; border-top:.5px solid var(--sep); color:var(--label-2); }
+  .ln:first-child { border-top:0; }
+  .ln time { color:var(--label-3); flex:none; }
+  .ln.err { color:var(--red); } .ln.ok { color:var(--label); }
+
+  .ctl .scroll { overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:var(--fill-2) transparent; padding-right:8px; }
+  .group { padding:14px 0; border-top:.5px solid var(--sep); }
+  .group:first-child { border-top:0; padding-top:0; }
+  .group h3 { font-size:.72rem; font-weight:600; color:var(--label-3); text-transform:uppercase; letter-spacing:.05em; margin-bottom:10px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:7px 0; font-size:.92rem; }
+  .row label { color:var(--label); }
+  .row small { display:block; font-size:.74rem; color:var(--label-3); margin-top:1px; }
+  input[type=number], input[type=text], select { font:inherit; font-size:.9rem; color:var(--label); background:var(--fill); border:0; border-radius:7px; padding:7px 10px; width:120px; text-align:right; outline:none; }
+  input[type=text].wide { width:100%; text-align:left; }
+  input:focus, select:focus { box-shadow:0 0 0 2px var(--blue); }
+  select { text-align:left; -webkit-appearance:none; appearance:none; padding-right:26px;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 9px center; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .chip { display:inline-flex; align-items:center; gap:6px; padding:5px 8px 5px 11px; border-radius:7px; background:var(--fill); font-size:.84rem; font-weight:600; }
+  .chip button { border:0; background:transparent; color:var(--label-3); cursor:pointer; font:inherit; font-size:1rem; line-height:1; padding:0 2px; }
+  .chip button:hover { color:var(--red); }
+  .addrow { display:flex; gap:8px; margin-top:8px; }
+  .addrow input { flex:1; text-align:left; text-transform:uppercase; }
+  .actions { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .toast { position:fixed; left:50%; bottom:22px; transform:translateX(-50%); padding:10px 16px; border-radius:10px; background:var(--label); color:var(--bg); font-size:.86rem; font-weight:600; opacity:0; pointer-events:none; transition:opacity .2s; z-index:9; }
+  .toast.show { opacity:1; }
+  .pf { font-family:var(--mono); font-size:.78rem; line-height:1.6; margin-top:8px; }
+  .pf div { display:flex; gap:8px; } .pf b { flex:none; width:26px; }
+  .pf .ok b{color:var(--green)} .pf .xx b{color:var(--red)} .pf .sk b{color:var(--label-3)}
+  .locked { font-size:.8rem; color:var(--label-3); padding:10px 12px; border-radius:8px; background:var(--fill); line-height:1.5; }
+  .locked b { color:var(--label-2); }
+  :focus-visible { outline:2px solid var(--blue); outline-offset:2px; border-radius:6px; }
+  @media (max-width:1100px) { body{overflow:auto} .app{height:auto;grid-template-columns:1fr;grid-template-rows:none;grid-template-areas:"top" "status" "ctl" "log"} .log .feed{max-height:420px} }
+</style>
+</head>
+<body>
+<main class="app">
+  <header class="top">
+    <div class="name">ZZY<span>control</span></div>
+    <div class="state"><span class="dot" id="dot"></span><span id="state-text">connecting</span></div>
+    <span id="live-badge" class="live-badge" hidden>LIVE</span>
+    <span id="paper-badge" class="paper-badge" hidden>PAPER</span>
+    <div class="spacer"></div>
+    <button class="btn" id="btn-tick">Run one tick</button>
+    <button class="btn go" id="btn-go">Start</button>
+    <button class="btn stop" id="btn-stop" hidden>Pause</button>
+    <button class="switch" id="theme" role="switch" aria-checked="true" aria-label="Dark mode"></button>
+  </header>
+
+  <section class="sec status">
+    <h2>Status</h2>
+    <dl class="kv">
+      <div><dt>Mode</dt><dd class="strong" id="s-mode">…</dd></div>
+      <div><dt>Doing now</dt><dd id="s-state">…</dd></div>
+      <div><dt>Last tick</dt><dd id="s-last">never</dd></div>
+      <div><dt>Ticks run</dt><dd id="s-ticks">0</dd></div>
+      <div><dt>Interval</dt><dd id="s-int">…</dd></div>
+      <div><dt>Watching</dt><dd id="s-cat">…</dd></div>
+      <div><dt>Last consultation</dt><dd id="s-research">never</dd></div>
+      <div><dt>Wallet</dt><dd id="s-wallet"><code>none</code></dd></div>
+      <div><dt>Last error</dt><dd id="s-err" class="warn">none</dd></div>
+    </dl>
+    <h2 style="margin-top:22px">Positions</h2>
+    <div id="positions" class="pos"></div>
+    <h2 style="margin-top:22px">Book</h2>
+    <dl class="kv">
+      <div><dt>Principal</dt><dd id="b-principal">$0.00</dd></div>
+      <div><dt>Book value</dt><dd class="strong" id="b-book">$0.00</dd></div>
+      <div><dt>Profit</dt><dd class="strong" id="b-pnl">$0.00</dd></div>
+      <div><dt>Swept to $ZZY</dt><dd id="b-swept">$0.00</dd></div>
+      <div><dt>Deployable</dt><dd id="b-dep">$0.00</dd></div>
+    </dl>
+  </section>
+
+  <section class="sec log">
+    <h2>Log</h2>
+    <div class="feed fill" id="log"></div>
+  </section>
+
+  <section class="sec ctl">
+    <h2>Controls</h2>
+    <div class="scroll fill">
+
+      <div class="group">
+        <h3>Limits</h3>
+        <div class="row"><label>Max position<small>% of the book one name may reach</small></label><input type="number" data-k="policy.sizing.maxPositionPercent" step="5"></div>
+        <div class="row"><label>Max step<small>% of the book added to one name per cycle</small></label><input type="number" data-k="policy.sizing.maxOrderPercent" step="5"></div>
+        <div class="row"><label>Min order<small>USD, below this a swap is not worth gas</small></label><input type="number" data-k="policy.sizing.minOrderUsd" step="1"></div>
+        <div class="row"><label>Hard cap per order<small>USD, optional. Blank lets the percentages govern</small></label><input type="number" data-k="policy.maxOrderUsd" step="1"></div>
+        <div class="row"><label>Exposure ceiling<small>USD, the hard cap on the book</small></label><input type="number" data-k="policy.maxTotalExposureUsd" step="1"></div>
+        <div class="row"><label>Max 5 min move<small>%, skip anything that just ran</small></label><input type="number" data-k="policy.maxPriceMovePercent" step="0.5"></div>
+        <div class="row"><label>Max pool premium<small>% over reference before skipping</small></label><input type="number" data-k="execution.maxPoolPremiumPercent" step="0.5"></div>
+        <div class="row"><label>Tick every<small>seconds, regular hours</small></label><input type="number" data-k="execution.tickIntervalSeconds" step="10"></div>
+        <div class="row"><label>Tick, extended hours<small>seconds, pre and after market</small></label><input type="number" data-k="execution.tickIntervalSecondsExtended" step="10"></div>
+        <div class="row"><label>Tick, closed<small>seconds, overnight and weekends</small></label><input type="number" data-k="execution.tickIntervalSecondsClosed" step="30"></div>
+        <div class="row"><label>Earnings blackout<small>days before a print during which no new position is opened</small></label><input type="number" data-k="policy.earningsBlackoutDays" step="1"></div>
+      </div>
+
+      <div class="group">
+        <h3>Research budget</h3>
+        <div class="row"><label>Review every<small>seconds, regular hours. Each review is one bill</small></label><input type="number" data-k="research.intervalSeconds" step="60"></div>
+        <div class="row"><label>Review, extended hours<small>seconds</small></label><input type="number" data-k="research.intervalSecondsExtended" step="60"></div>
+        <div class="row"><label>Review, closed<small>seconds, overnight and weekends</small></label><input type="number" data-k="research.intervalSecondsClosed" step="300"></div>
+        <div class="row"><label>Skip when nothing changed<small>only call the model when the inputs differ from the last review</small></label><button class="switch" role="switch" aria-checked="true" data-k="research.skipIfNothingNew" type="button"></button></div>
+        <div class="row"><label>Post to X<small>off = dry-run, posts go to the log only. Needs X keys in .env</small></label><button class="switch" role="switch" aria-checked="false" data-k="social.enabled" type="button"></button></div>
+        <div class="row"><label>Safety cap<small>posts per day. Real events always post; this only stops a runaway</small></label><input type="number" data-k="social.safetyCapPerDay" step="5"></div>
+        <div class="row"><label>Quiet hours<small>between thoughts and review notes when nothing real happened</small></label><input type="number" data-k="social.softEveryHours" step="1"></div>
+        <div class="row"><label>Post losses and down days<small>off = losses, drawdowns and gloomy thoughts are not posted. Never spun either</small></label><button class="switch" role="switch" aria-checked="false" data-k="social.postBearish" type="button"></button></div>
+        <div class="row"><label>Names per consultation<small>top N by interest, the only lever on cost</small></label><input type="number" data-k="research.maxCandidatesPerCycle" step="1"></div>
+        <div class="row"><label>Interest threshold<small>below this, nothing is sent</small></label><input type="number" data-k="research.minInterestScore" step="1"></div>
+        <div class="row"><label>Web searches per consultation<small>headlines and filings are pre-fetched free</small></label><input type="number" data-k="research.maxSearchesPerCycle" step="1"></div>
+        <div class="row"><label>Give Claude up to<small>ms per consultation, before holding instead</small></label><input type="number" data-k="research.timeoutMs" step="30000"></div>
+      </div>
+
+      <div class="group">
+        <h3>Profit</h3>
+        <div class="row"><label>Mode</label>
+          <select data-k="profitPolicy.mode"><option value="threshold">Compound to target, then sweep</option><option value="compound">Always compound</option><option value="buyback">Sweep all profit to $ZZY</option></select></div>
+        <div class="row"><label>Compound target<small>USD</small></label><input type="number" data-k="profitPolicy.compoundUntilUsd" step="100"></div>
+        <div class="row"><label>Stop loss<small>%, blank to disable</small></label><input type="number" data-k="exitPolicy.maxLossPercent" step="1" placeholder="off"></div>
+      </div>
+
+      <div class="group">
+        <h3>Token</h3>
+        <div class="row" style="flex-direction:column;align-items:stretch;gap:6px"><label>$ZZY contract address</label><input type="text" class="wide mono" data-k="treasury.zzyTokenAddress" placeholder="0x…"></div>
+        <div class="row"><label>Claim threshold<small>ETH</small></label><input type="number" data-k="pons.claimThresholdEth" step="0.01"></div>
+      </div>
+
+      <div class="group" id="fork-tools" hidden>
+        <h3>Fork test trades</h3>
+        <div class="row"><label>Force a buy<small>real swap on the fork, skips Claude</small></label>
+          <span style="display:flex;gap:6px"><input type="text" id="fb-sym" placeholder="NVDA" style="width:80px;text-align:left;text-transform:uppercase"><input type="number" id="fb-usd" value="20" style="width:70px"><button class="btn" id="fb-go">Buy</button></span></div>
+        <div class="row"><label>Make Claude say<small>next cycle, through the real decision path</small></label>
+          <span style="display:flex;gap:6px"><input type="text" id="fv-sym" placeholder="NVDA" style="width:80px;text-align:left;text-transform:uppercase"><select id="fv-v" style="width:110px"><option>PREPARE</option><option>WATCH</option><option>REJECT</option></select><button class="btn" id="fv-go">Queue</button></span></div>
+        <div class="row"><label>Make the exit review say<small>next cycle, on a held position</small></label>
+          <span style="display:flex;gap:6px"><input type="text" id="fe-sym" placeholder="NVDA" style="width:80px;text-align:left;text-transform:uppercase"><select id="fe-a" style="width:110px"><option>CLOSE</option><option>TRIM</option><option>HOLD</option></select><button class="btn" id="fe-go">Queue</button></span></div>
+        <div class="row"><label>Force a sell<small>closes the position through the real exit path</small></label>
+          <span style="display:flex;gap:6px"><input type="text" id="fs-sym" placeholder="NVDA" style="width:80px;text-align:left;text-transform:uppercase"><button class="btn" id="fs-go">Sell all</button></span></div>
+      </div>
+
+      <div class="group">
+        <h3>Actions</h3>
+        <div class="actions">
+          <button class="btn" id="btn-pf">Run preflight</button>
+          <button class="btn" id="btn-paper">Reset paper capital</button>
+        </div>
+        <div class="pf" id="pf"></div>
+      </div>
+
+      <div class="group">
+        <div class="locked"><b>Live mode isn't switchable from here.</b> It's a config edit plus two environment variables plus a restart, on purpose. This panel can pause, tune and inspect a live process, but it can't create one.</div>
+      </div>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
+  var usd = function (n) { return '$' + Number(n || 0).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}); };
+  var ago = function (iso) { if (!iso) return 'never'; var s = (Date.now() - new Date(iso)) / 1000; return s < 5 ? 'just now' : s < 60 ? Math.floor(s) + 's ago' : s < 3600 ? Math.floor(s/60) + 'm ago' : Math.floor(s/3600) + 'h ago'; };
+
+  // The token arrives once in the URL, gets pulled into memory, and the URL
+  // is scrubbed so it does not sit in history or get pasted somewhere.
+  var token = new URLSearchParams(location.search).get('token') || sessionStorage.getItem('zzy-token');
+  if (token) { sessionStorage.setItem('zzy-token', token); history.replaceState(null, '', location.pathname); }
+  if (!token) { document.body.innerHTML = '<p style="padding:40px;font-size:1rem">Open this page using the URL printed in the terminal. It contains your session token.</p>'; return; }
+
+  var busy = false, editing = null, lastState = null;
+  function api(method, path, body) {
+    return fetch('/api/' + path, {method: method, headers: {'x-zzy-token': token, 'content-type': 'application/json'}, body: body ? JSON.stringify(body) : undefined})
+      .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || r.status); return j; }); });
+  }
+  var toastT; function toast(m, bad) { var t = $('toast'); t.textContent = m; t.style.background = bad ? 'var(--red)' : 'var(--label)'; t.style.color = bad ? '#fff' : 'var(--bg)'; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(function () { t.classList.remove('show'); }, 2200); }
+
+  // theme
+  var root = document.documentElement;
+  function applyTheme(t, anim) { if (anim) { root.classList.add('theming'); setTimeout(function () { root.classList.remove('theming'); }, 350); } root.setAttribute('data-theme', t); $('theme').setAttribute('aria-checked', t === 'dark' ? 'true' : 'false'); }
+  var saved = null; try { saved = localStorage.getItem('zzy-theme'); } catch (e) {}
+  applyTheme(saved || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'), false);
+  $('theme').addEventListener('click', function () { var n = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; applyTheme(n, true); try { localStorage.setItem('zzy-theme', n); } catch (e) {} });
+
+  function render(d) {
+    lastState = d;
+    var r = d.runner;
+    $('dot').className = 'dot ' + r.state;
+    $('state-text').textContent = r.state === 'idle' ? 'running' : r.state === 'ticking' ? 'ticking' : r.state;
+    $('live-badge').hidden = !r.live; $('paper-badge').hidden = !r.paper;
+    $('fork-tools').hidden = !r.fork;
+    var running = r.state === 'idle' || r.state === 'ticking';
+    $('btn-go').hidden = running; $('btn-stop').hidden = !running;
+    $('btn-tick').disabled = r.state === 'ticking';
+
+    $('s-mode').textContent = (r.live ? 'Live, signing' : r.mode === 'live' ? 'Live config, ack missing' : 'Preview, cannot sign') + (r.paper ? ' (paper)' : '');
+    $('s-mode').className = r.live ? 'strong down' : 'strong';
+    $('s-state').textContent = r.state === 'ticking' ? 'Running a cycle' : r.state === 'idle' ? 'Waiting for next tick' : r.state === 'paused' ? 'Paused' : 'Stopped';
+    $('s-last').textContent = ago(r.lastTickAt); $('s-ticks').textContent = r.tickCount;
+    $('s-int').textContent = r.intervalSeconds + 's';
+    $('s-wallet').innerHTML = '<code>' + esc(r.wallet ? r.wallet.slice(0,6) + '…' + r.wallet.slice(-4) : 'none') + '</code>';
+    $('s-err').textContent = r.lastError || 'none'; $('s-err').className = r.lastError ? 'down' : 'warn';
+
+    if (d.book) {
+      var b = d.book;
+      $('b-principal').textContent = usd(b.principalUsd); $('b-book').textContent = usd(b.bookValueUsd);
+      $('b-pnl').textContent = (b.lifetimeProfitUsd < 0 ? '-' : b.lifetimeProfitUsd > 0 ? '+' : '') + usd(Math.abs(b.lifetimeProfitUsd));
+      $('b-pnl').className = 'strong ' + (b.lifetimeProfitUsd > 0 ? 'up' : b.lifetimeProfitUsd < 0 ? 'down' : '');
+      $('b-swept').textContent = usd(b.sweptToBuybackUsd);
+      $('b-dep').textContent = usd(Math.max(0, Math.min(b.bookValueUsd - b.sweepableUsd, lastState.editable['policy.maxTotalExposureUsd'] || 0)));
+    }
+
+    // inputs (don't overwrite whatever the user is currently typing in)
+    var e = d.editable;
+    document.querySelectorAll('[data-k]').forEach(function (el) {
+      var k = el.dataset.k, v = e[k];
+      if (el === editing) return;
+      if (el.getAttribute('role') === 'switch') el.setAttribute('aria-checked', v ? 'true' : 'false');
+      else if (el.tagName === 'SELECT') el.value = v;
+      else el.value = v == null ? '' : v;
+    });
+    $('s-cat').textContent = r.catalogSymbols ? r.catalogSymbols + ' instruments' : '…';
+    $('s-research').textContent = r.lastReviewAt ? ago(r.lastReviewAt) : 'never';
+    var ps = d.positions || [];
+    $('positions').innerHTML = ps.length ? ps.map(function (p) {
+      return '<div class="row"><b>' + esc(p.symbol) + '</b><span>' + Number(p.qty).toFixed(4) + '<small> · basis ' + usd(p.costBasisUsd) + '</small></span><small>' + esc(ago(p.openedAt)) + '</small></div>';
+    }).join('') : '<div class="none">No open positions</div>';
+
+    var feed = $('log'), atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 40;
+    feed.innerHTML = (d.lines || []).map(function (l) {
+      var cls = /error|failed|refused|skipping/i.test(l.msg) ? ' err' : /would buy|executed|claimed|ready/i.test(l.msg) ? ' ok' : '';
+      return '<div class="ln' + cls + '"><time>' + esc(l.at.slice(11,19)) + '</time><span>' + esc(l.msg) + '</span></div>';
+    }).join('');
+    if (atBottom) feed.scrollTop = feed.scrollHeight;
+  }
+
+  function refresh() { return api('GET', 'state').then(render).catch(function (e) { $('state-text').textContent = 'disconnected'; $('dot').className = 'dot'; }); }
+
+  function save(k, v) {
+    var set = {}; set[k] = v;
+    return api('POST', 'config', {set: set}).then(function () { toast('Saved ' + k.split('.').pop()); return refresh(); })
+      .catch(function (e) { toast(e.message, true); return refresh(); });
+  }
+
+  // inputs commit on change / enter / blur
+  document.querySelectorAll('input[data-k], select[data-k]').forEach(function (el) {
+    el.addEventListener('focus', function () { editing = el; });
+    el.addEventListener('blur', function () { editing = null; });
+    el.addEventListener('change', function () {
+      var k = el.dataset.k, raw = el.value.trim(), v;
+      if (el.tagName === 'SELECT') v = raw;
+      else if (el.type === 'number') v = raw === '' ? null : Number(raw);
+      else v = raw === '' ? null : raw;
+      save(k, v);
+    });
+  });
+  document.querySelectorAll('button[data-k][role=switch]').forEach(function (el) {
+    el.addEventListener('click', function () { save(el.dataset.k, el.getAttribute('aria-checked') !== 'true'); });
+  });
+
+
+  // run controls
+  $('btn-go').addEventListener('click', function () { api('POST', 'resume').then(refresh).catch(function (e) { toast(e.message, true); }); });
+  $('btn-stop').addEventListener('click', function () { api('POST', 'pause').then(refresh).catch(function (e) { toast(e.message, true); }); });
+  $('btn-tick').addEventListener('click', function () {
+    $('btn-tick').disabled = true; toast('Ticking…');
+    api('POST', 'tick').then(function () { toast('Tick done'); return refresh(); }).catch(function (e) { toast(e.message, true); refresh(); });
+  });
+  $('btn-pf').addEventListener('click', function () {
+    $('pf').innerHTML = '<div><b>…</b>running, this hits the chain</div>';
+    api('POST', 'preflight').then(function (r) {
+      $('pf').innerHTML = r.checks.map(function (c) { var cls = c.skipped ? 'sk' : c.ok ? 'ok' : 'xx'; return '<div class="' + cls + '"><b>' + (c.skipped ? '--' : c.ok ? 'ok' : 'XX') + '</b><span>' + esc(c.name) + ': ' + esc(c.detail) + '</span></div>'; }).join('')
+        + '<div style="margin-top:6px;color:var(--label-3)">' + r.passed + ' passed, ' + r.failed + ' failed' + (r.ready ? (r.account ? '. Every transaction simulated clean.' : '. Add a wallet address to simulate transactions.') : '. Fix the XX lines before going live.') + '</div>';
+      refresh();
+    }).catch(function (e) { $('pf').innerHTML = '<div class="xx"><b>XX</b><span>' + esc(e.message) + '</span></div>'; });
+  });
+  $('btn-paper').addEventListener('click', function () {
+    var amt = prompt('Paper trading capital, USD:', '500'); if (amt === null) return;
+    api('POST', 'paper/reset', {capitalUsd: Number(amt)}).then(function () { toast('Paper capital set'); return refresh(); }).catch(function (e) { toast(e.message, true); });
+  });
+
+  $('fb-go').addEventListener('click', function () {
+    var sym = $('fb-sym').value.trim().toUpperCase(), usd = Number($('fb-usd').value); if (!sym) return;
+    $('fb-go').disabled = true; toast('Buying ' + sym + ' on the fork…');
+    api('POST', 'fork/buy', {symbol: sym, usd: usd}).then(function (r) { toast('Bought ' + r.qty.toFixed(4) + ' ' + sym); refresh(); })
+      .catch(function (e) { toast(e.message, true); }).then(function () { $('fb-go').disabled = false; });
+  });
+  $('fs-go').addEventListener('click', function () {
+    var sym = $('fs-sym').value.trim().toUpperCase(); if (!sym) return;
+    $('fs-go').disabled = true; toast('Selling ' + sym + '…');
+    api('POST', 'fork/sell', {symbol: sym, fraction: 1}).then(function (r) { toast('Sold, realised ' + (r.realizedUsd >= 0 ? '+' : '') + '$' + r.realizedUsd.toFixed(2)); refresh(); })
+      .catch(function (e) { toast(e.message, true); }).then(function () { $('fs-go').disabled = false; });
+  });
+  $('fv-go').addEventListener('click', function () {
+    var sym = $('fv-sym').value.trim().toUpperCase(); if (!sym) return;
+    api('POST', 'fork/verdict', {symbol: sym, verdict: $('fv-v').value}).then(function () { toast('Queued for next cycle'); refresh(); }).catch(function (e) { toast(e.message, true); });
+  });
+  $('fe-go').addEventListener('click', function () {
+    var sym = $('fe-sym').value.trim().toUpperCase(); if (!sym) return;
+    api('POST', 'fork/exit', {symbol: sym, action: $('fe-a').value}).then(function () { toast('Queued for next cycle'); refresh(); }).catch(function (e) { toast(e.message, true); });
+  });
+  refresh(); setInterval(refresh, 3000);
+})();
+</script>
+</body>
+</html>
