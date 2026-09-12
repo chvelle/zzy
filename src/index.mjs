@@ -38,7 +38,29 @@ const arg=(flag)=>{const i=args.indexOf(flag);return i===-1?null:args[i+1]??null
 const fail=(m)=>{console.error(`Refused: ${m}`);process.exitCode=1;};
 
 // ETH/USD: the pons interface uses DeFiLlama; you can swap this for Chainlink.
-if(command==='release:check'){
+if(command==='buy'){
+  // Operator-directed live buy through the normal path. Posts to X like any buy.
+  const sym=(args[0]||'').toUpperCase(); const usd=Number(args[1]);
+  if(!sym||!(usd>0)){fail('usage: npm run buy -- SYMBOL USD [--max-premium N] [--note "why"]');process.exit(1);}
+  const {operatorBuy}=await import('./engine.mjs');
+  const {createGuardedSigner}=await import('./adapters/signer.mjs');
+  const {loadCatalog}=await import('./catalog.mjs');
+  const {socialAfterTick}=await import('./social.mjs');
+  const {readLedger}=await import('./treasury.mjs');
+  const client=publicClient(config.chain?.rpcUrl);
+  const signer=createGuardedSigner(config,process.env);
+  const catalog=await loadCatalog(config);
+  const mp=arg('--max-premium'); const note=arg('--note')??'operator-directed buy';
+  const r=await operatorBuy({client,signer,config,catalog,symbol:sym,usd,note,maxPremiumPercent:mp!=null?Number(mp):null,log:console.log});
+  console.log(JSON.stringify(r,null,2));
+  await writeSiteData(config,{wallet:signer.address});
+  try{
+    const out={trading:{buys:[{symbol:r.symbol,usd:r.usd,qty:r.qty,hash:r.hash,venue:r.venue,rationale:note}],exits:[]},treasury:{}};
+    const site=(await writeSiteData(config,{wallet:signer.address})).data;
+    const sr=await socialAfterTick({out,site,config,env:process.env,log:console.log,ledger:await readLedger(config).catch(()=>null),tradesCount:site?.activity?.ordersExecuted??0});
+    console.log('social:',JSON.stringify(sr));
+  }catch(e){console.log('social skipped:',e.message);}
+}else if(command==='release:check'){
   const {releaseCheck}=await import('./release-check.mjs');
   const r=await releaseCheck();
   if(r.clean){console.log('clean: nothing personal or secret in the tree');}
@@ -108,6 +130,34 @@ if(command==='release:check'){
 }else if(command==='zzy'){
   const zzy=config.treasury?.zzyTokenAddress;if(!zzy){fail('treasury.zzyTokenAddress not set');process.exit(1);}
   const client=publicClient(config.chain?.rpcUrl);
+  const {ponsVersion}=await import('./loop.mjs');
+  const version=await ponsVersion(client,config);
+  if(version==='v2'){
+    const {readLaunch,escrowOwed,unsweptFees,fmt,poolId,PONS_V2}=await import('./adapters/pons-v2.mjs');
+    const {zeroAddress,formatUnits}=await import('viem');
+    const launch=await readLaunch(client,zzy,config.pons?.v2?.factory);
+    const wallet=(await operatorAddress())??config.runtime?.watchAddress??launch.creatorFeeRecipient;
+    const {ERC20_ABI}=await import('./chain.mjs');
+    let pairSymbol='ETH',dec=18;
+    if(!launch.native){try{[pairSymbol,dec]=await Promise.all([client.readContract({address:launch.pairToken,abi:ERC20_ABI,functionName:'symbol'}),client.readContract({address:launch.pairToken,abi:ERC20_ABI,functionName:'decimals'}).then(Number)]);}catch{pairSymbol=launch.pairToken;}}
+    const owed=await escrowOwed(client,wallet,launch.native?zeroAddress:launch.pairToken,config.pons?.v2?.escrow);
+    const unswept=await unsweptFees(client,launch).catch(e=>({error:e.message.split('\n')[0]}));
+    const out={
+      pons:'v2',token:zzy,curve:launch.curve,phase:launch.phaseName,
+      quoteAsset:launch.native?'ETH (native)':`${pairSymbol} ${launch.pairToken}`,
+      creatorFeeRecipient:launch.creatorFeeRecipient,
+      payoutGoesToThisWallet:wallet.toLowerCase()===launch.creatorFeeRecipient.toLowerCase(),
+      creatorTaxBps:launch.creatorTaxBps,ponsBuybackEnabled:launch.buybackEnabled,
+      escrowOwed:`${fmt(owed,dec)} ${pairSymbol}`,
+      unswept:unswept.error?unswept:{where:unswept.where,amount:`${fmt(unswept.quoteFee+unswept.creatorTax,dec)} ${pairSymbol}`},
+      v4PoolId:launch.phase===2?poolId(launch):null,
+      claimThresholdUsd:config.pons?.claimThresholdUsd??20,
+    };
+    console.log(JSON.stringify(out,null,2));
+    if(!out.payoutGoesToThisWallet)console.log(`\nWARNING: creator fees are paid to ${launch.creatorFeeRecipient}, not the operator wallet ${wallet}. The bot cannot claim them. Either run the bot from that wallet, or call transferCreatorFeeRecipient on the Pons factory from that wallet to point fees at ${wallet}.`);
+    if(launch.buybackEnabled)console.log('\nNote: Pons-side buybacks are on for this launch. Part of the creator share is spent by Pons on its own buyback and vested over five years; that is separate from, and in addition to, the half ZZY buys and holds itself.');
+    process.exit(0);
+  }
   const [info,grad]=await Promise.all([readTokenInfo(client,zzy,config.pons?.factory),graduation(client,zzy,config.pons?.factory)]);
   const claimable=await readClaimableWeth(client,zzy,config).catch(e=>`error: ${e.message}`);
   const watch=config.runtime?.watchAddress??info.creatorPayout;const weth=await wethBalance(client,watch);

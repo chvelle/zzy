@@ -504,22 +504,36 @@ The static host serves a snapshot. To make it follow the bot without ever
 exposing the machine that holds the key, the bot pushes its two data files
 to Vercel Blob as they change and the page reads them from there.
 
+Vercel keeps the blob store's token sensitive: it works inside the project
+but cannot be read back out. So the site carries a tiny function,
+`/api/push`, that does the blob write with the token Vercel holds, and the
+bot calls that function with a secret you choose. Nothing sensitive leaves
+Vercel; the only secret on your machine is one you made up.
+
 One-time setup:
 
 1. Vercel dashboard, your `zzy` project, **Storage**, Create Database,
-   **Blob**. Connect it to the project.
-2. Project **Settings**, **Environment Variables**: copy
-   `BLOB_READ_WRITE_TOKEN`. Put it in `.env` (silent prompt, same as the
-   other keys):
+   **Blob**, connect it to the project. This puts `BLOB_READ_WRITE_TOKEN`
+   on the project. You never need to see it.
+2. Make a secret:
 
    ```bash
-   sed -i '' '/^BLOB_READ_WRITE_TOKEN=/d' .env; read -s "K?Blob token: "; echo; echo "BLOB_READ_WRITE_TOKEN=$K" >> .env; unset K
+   openssl rand -hex 24
    ```
 
-3. Push once by hand and deploy the page so it knows where to look:
+3. Project **Settings**, **Environment Variables**, Add: key
+   `ZZY_PUSH_SECRET`, value the secret, all environments. Save.
+4. Put the same secret in `.env` (silent prompt):
 
    ```bash
-   npm run site:push && npm run site:deploy
+   sed -i '' '/^ZZY_PUSH_SECRET=/d' .env; read -s "K?Push secret: "; echo; echo "ZZY_PUSH_SECRET=$K" >> .env; unset K
+   ```
+
+5. Deploy the site once so the function exists, then push once by hand so
+   `feed.json` is written, then deploy again so the page knows where to look:
+
+   ```bash
+   npm run site:deploy && npm run site:push && npm run site:deploy
    ```
 
 That's it. From then on, while the bot runs, `data.json` goes to the blob
@@ -527,11 +541,11 @@ whenever it changes (at most every `site.push.intervalSeconds`, 30) and
 `history.json` every 5 minutes. The blob's CDN holds a file for
 `site.push.cacheSeconds` (60, Vercel's floor) and the page polls every 15
 seconds, so the numbers on zzy.live are never more than about 90 seconds
-behind the bot. `feed.json` in the site folder is what tells the page to
-read from the blob; it is written by the first push, so deploy after it.
+behind the bot.
 
-The page still works without any of this: no token means no push, and the
-site stays a snapshot you update with `npm run site:deploy`.
+If you do have the blob token, `BLOB_READ_WRITE_TOKEN` in `.env` works
+instead and the function is not used. Without either, the site stays a
+snapshot you update with `npm run site:deploy`.
 
 ### Hosting it publicly
 
@@ -609,6 +623,44 @@ of it is spun into something else either. The dashboard remains the full
 record and the account links to it. `social.postBearish` turns this off,
 and then it says losses plainly.
 
+### Pons V1 or V2
+
+Pons has two generations and the bot supports both. `pons.version: "auto"`
+asks the V2 factory whether it knows your token; if it does, the V2 path
+runs, otherwise V1. `npm run zzy` tells you which it picked and, for V2,
+the launch phase (on the curve, or trading on the Uniswap v4 pool), the
+quote asset, and what the fee escrow currently owes you.
+
+On V2 the shape is the same, the plumbing differs: fees are claimed from the
+Pons fee escrow in the launch's quote asset (ETH, USDG or a stock token);
+$ZZY is bought on the bonding curve until graduation and on the Uniswap v4
+pool through the Universal Router after it; the trading half becomes USDG
+(nothing to do if the pair is already USDG). A buyback that cannot run this
+tick is parked in the ledger and retried, never spent elsewhere.
+`pons.claimThresholdUsd` is the claim trigger for V2.
+
+### Posture
+
+`research.posture` (also in the panel) sets how much conviction a setup
+needs before capital goes in. `patient` waits for confirmation and treats
+cash as a position. `balanced` (the default) takes starter positions of 10
+to 20 percent on a defensible view, and is allowed to forecast, with a
+downside case and a falsifier. `active` expects to hold positions and
+treats cash as the exception. The hard guards (pool premium, exposure,
+minimum order, earnings blackout, the signer) apply the same under all
+three; posture changes the model's bar, never the engine's.
+
+### The allocator thinks in percent, never in dollars
+
+The model that reviews the book is never told how much money is in it.
+It sees cash as a percent, each position as a percent, and sets targets as
+a percent. Spreads, fees and moves are percents too, so nothing about its
+reasoning changes between a $150 book and a $150,000 one. That is on
+purpose: told the dollar figure, it gets timid when the book is small and
+loose when it is large, and neither is a reason to trade differently.
+Dollars stay in the engine, which does the sizing, the minimum-order floor
+and the exposure ceilings deterministically after the model has decided.
+
 ### How money moves onchain
 
 Worth having straight in your head before live:
@@ -616,8 +668,16 @@ Worth having straight in your head before live:
 - **Fees arrive as WETH.** The $ZZY pool is WETH-paired, so a claim pays
   WETH. Half is swapped WETH to $ZZY and held. The other half is swapped
   WETH to USDG through the chain's deepest pool, and that USDG is the book.
-- **Stocks are bought with USDG and sold for USDG.** Single hop, each token's
-  own USDG pool, best fee tier by quote. The signer permits exactly four
+- **Stocks are bought with USDG and sold for USDG.** Single hop, on
+  whichever venue quotes better. The bot asks the chain which v4 pools exist
+  for the pair (any fee, any tick spacing, any hook) and quotes every one,
+  plus the v3 tiers. Hookless v4 pools are always usable; a pool on a hook
+  is quoted and reported but not used until you list the hook under
+  `uniswap.v4.allowedHooks`, after checking it on Blockscout. v4 swaps go
+  through the Universal Router with the Permit2 route; the log says which
+  venue each trade used.
+- **$ZZY bought back is burned.** The bot never sells it; the burn takes it
+  out of circulation for good. The signer permits exactly four
   swap legs: WETH to $ZZY, WETH to USDG, USDG to stock, stock to USDG. It
   refuses everything else, including cash back out to ETH and stock to
   stock.
@@ -862,6 +922,7 @@ npm run verify:write           same, and patch config where unambiguous
 npm run wallet                 show the operator address, check .env permissions
 npm run wallet:new             generate a fresh operator key into .env
 npm run fund -- --usd 500      record USDG you sent to the wallet as trading principal
+npm run buy -- CRM 20          operator-directed live buy through the normal path (same guards; --max-premium N to raise the cap for one order)
 npm run smoke:testnet          one real transaction on chain 46630
 npm run preflight -- --address 0x..   simulate every transaction against live state
 npm run fork                   start Anvil forking Robinhood Chain (own tab)

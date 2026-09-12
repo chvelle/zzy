@@ -90,7 +90,7 @@ export async function readLedger(config) {
   return readJsonOrDefault(file, EMPTY_LEDGER);
 }
 
-async function writeLedger(ledger, config) {
+export async function writeLedger(ledger, config) {
   const file = config.treasury?.ledgerPath ?? 'treasury/ledger.json';
   return writeJsonAtomic(file, ledger, {backup: true});
 }
@@ -98,7 +98,7 @@ async function writeLedger(ledger, config) {
 // Records a buyback that ALREADY happened. txHash is required: without a
 // settled transaction there is nothing to record, and this module will not
 // pretend an intent is a fill (AGENT.md rule #8).
-export async function recordBuyback({claimUsd, claimEth, buybackUsd, tradingUsd, txHash, at}, config) {
+export async function recordBuyback({claimUsd, claimEth, buybackUsd, tradingUsd, txHash, at, cashTxHash = null, claimTxHash = null, extra = null}, config) {
   assertZzyDisposalBlocked('BUY'); // sanity: BUY is allowed, disposals throw
   if (!txHash || typeof txHash !== 'string') {
     throw new Error('recordBuyback requires the txHash of an already-settled buyback transaction');
@@ -112,6 +112,9 @@ export async function recordBuyback({claimUsd, claimEth, buybackUsd, tradingUsd,
     buybackUsd,
     tradingUsd,
     txHash,
+    ...(cashTxHash ? {cashTxHash} : {}),
+    ...(claimTxHash ? {claimTxHash} : {}),
+    ...(extra ?? {}),
     zzyDisposition: 'held-permanently',
   });
   const file = await writeLedger(ledger, config);
@@ -169,8 +172,17 @@ export async function recordDeposit({amountUsd, walletUsd, note, at}, config) {
 }
 
 export function zzyHeldForever(ledger) {
-  const totalBoughtUsd = ledger.entries
-    .filter(e => e.type === 'fee-claim')
-    .reduce((sum, e) => sum + (e.buybackUsd ?? 0), 0);
-  return {totalBoughtUsd: Number(totalBoughtUsd.toFixed(8)), everSold: false, sellPossible: false};
+  // Every buyback: the half recorded on a claim, plus deferred buybacks that
+  // settled later. An older settled record without a usd figure is valued
+  // from its USDG amount (6 decimals), the only asset a V2 launch here pays.
+  const USDG = '0x5fc5360d0400a0fd4f2af552add042d716f1d168';
+  const totalBoughtUsd = ledger.entries.reduce((sum, e) => {
+    if (e.type === 'fee-claim') return sum + (e.buybackUsd ?? 0);
+    if (e.type === 'buyback-settled') {
+      if (typeof e.usd === 'number') return sum + e.usd;
+      if (typeof e.asset === 'string' && e.asset.toLowerCase() === USDG && e.amount) return sum + Number(e.amount) / 1e6;
+    }
+    return sum;
+  }, 0);
+  return {totalBoughtUsd: Number(totalBoughtUsd.toFixed(8)), everSold: false, sellPossible: false, disposition: 'burned'};
 }

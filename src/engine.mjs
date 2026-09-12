@@ -17,6 +17,41 @@ import {readLedger, recordRealizedPnl} from './treasury.mjs';
 import {CASH, cashDecimals, cashBalance, toCash, fromCash} from './cash.mjs';
 import {deployable} from './profit.mjs';
 import {bestQuote, buildApproveTx, buildSwapTx, applySlippage} from './adapters/uniswap.mjs';
+import {bestV4Quote, buildV4SwapTx, permit2Route} from './adapters/uniswap-v4.mjs';
+
+// Both venues are asked and the better quote wins. v3 for the few names
+// whose depth is there; v4 for the rest. A venue with no pool is simply not
+// in the running; with neither, there is no trade.
+export async function bestVenueQuote(client, {tokenIn, tokenOut, amountIn, allowedHooks = []}, log = () => {}) {
+  const [v3, v4] = await Promise.all([
+    bestQuote(client, {tokenIn, tokenOut, amountIn}).then(q => ({...q, venue: 'v3'})).catch(() => null),
+    bestV4Quote(client, {tokenIn, tokenOut, amountIn, allowedHooks, log}).catch(() => null),
+  ]);
+  if (!v3 && !v4) throw new Error(`no Uniswap pool (v3 or v4) quotes ${tokenIn} -> ${tokenOut}`);
+  const best = !v4 ? v3 : !v3 ? v4 : (v4.amountOut > v3.amountOut ? v4 : v3);
+  if (v3 && v4) log(`venues: v3 ${v3.amountOut} vs v4 ${v4.amountOut}, taking ${best.venue}`);
+  return best;
+}
+
+// Executes a quoted swap on its venue, approvals included. Returns the swap hash.
+export async function executeSwap({client, signer, config, quote, tokenIn, tokenOut, amountIn, amountOutMinimum, label}) {
+  if (quote.venue === 'v4') {
+    for (const tx of await permit2Route(client, {owner: signer.address, token: tokenIn, amount: amountIn})) {
+      await settled(client, await signer.send({to: tx.to, data: tx.data, value: tx.value}), `${label} ${tx.label}`);
+    }
+    const tx = buildV4SwapTx({key: quote.key, zeroForOne: quote.zeroForOne, tokenIn, tokenOut, amountIn, amountOutMinimum});
+    const hash = await signer.send({to: tx.to, data: tx.data, value: tx.value});
+    const receipt = await settled(client, hash, `${label} (v4)`);
+    return {hash, receipt};
+  }
+  await settled(client, await signer.send(buildApproveTx(tokenIn, amountIn)), `${label} approve`);
+  const hash = await signer.send(buildSwapTx({
+    tokenIn, tokenOut, fee: quote.fee, amountIn, amountOutMinimum,
+    recipient: signer.address, routerVariant: config.uniswap?.routerVariant,
+  }));
+  const receipt = await settled(client, hash, `${label} (v3)`);
+  return {hash, receipt};
+}
 import {sessionAt} from './session.mjs';
 import {sizeBuy, portfolioView, sizingConfig} from './sizing.mjs';
 
@@ -134,15 +169,10 @@ async function executeExit({client, signer, config, p, q, plan, positions, ethUs
   if (amountIn > heldOnChain) amountIn = heldOnChain;
   if (amountIn <= 0n) throw new Error('nothing on-chain to sell, position record is stale');
   const sellQty = Number(formatUnits(amountIn, decimals));
-  const quote = await bestQuote(client, {tokenIn: p.address, tokenOut: CASH, amountIn});
+  const quote = await bestVenueQuote(client, {tokenIn: p.address, tokenOut: CASH, amountIn, allowedHooks: config.uniswap?.v4?.allowedHooks ?? []}, log);
   const cashBefore = await cashBalance(client, signer.address);
-  await settled(client, await signer.send(buildApproveTx(p.address, amountIn)), `${p.symbol} approve`);
-  const hash = await signer.send(buildSwapTx({
-    tokenIn: p.address, tokenOut: CASH, fee: quote.fee, amountIn,
-    amountOutMinimum: applySlippage(quote.amountOut, config.execution?.stockSlippageBps ?? 100),
-    recipient: signer.address, routerVariant: config.uniswap?.routerVariant,
-  }));
-  await settled(client, hash, `${p.symbol} sell`);
+  const {hash} = await executeSwap({client, signer, config, quote, tokenIn: p.address, tokenOut: CASH, amountIn,
+    amountOutMinimum: applySlippage(quote.amountOut, config.execution?.stockSlippageBps ?? 100), label: `${p.symbol} sell`});
   const cashAfter = await cashBalance(client, signer.address);
   const proceedsUsd = fromCash(cashAfter.raw - cashBefore.raw, cashAfter.decimals);
   // A successful swap with no cash arriving means the receipt lied or the
@@ -360,6 +390,11 @@ export async function tradingCycle({client, signer, config, catalog, ethUsd, now
     candidates: shortlist.map(c => ({snapshot: c.snapshot, decision: {confidence: c.score, decision: 'CANDIDATE'}, headlines: c.headlines, events: c.events}))}, config);
   if (review.summary) log(`review: ${review.summary}`);
   else if (review.reason) log(`review: ${review.reason}`);
+  // A review that never happened (network, timeout) does not count as one:
+  // the gate is reset so the next tick tries again instead of waiting a
+  // full interval, and the fingerprint is cleared so "nothing changed"
+  // cannot skip it.
+  if (review.failed) { state.lastReviewAt = null; state.lastFingerprint = null; log('review did not complete; will retry on the next tick'); }
   // What it wants to remember for next time.
   try { await saveNotebook(applyNotes(notebook, notesFromReview(review), config, now), config); }
   catch (e) { log(`could not save notebook: ${e.message}`); }
@@ -420,7 +455,7 @@ export async function tradingCycle({client, signer, config, catalog, ethUsd, now
 
     let quote = null, premium = null;
     try {
-      quote = await bestQuote(client, {tokenIn: CASH, tokenOut: token.address, amountIn});
+      quote = await bestVenueQuote(client, {tokenIn: CASH, tokenOut: token.address, amountIn, allowedHooks: config.uniswap?.v4?.allowedHooks ?? []}, log);
       const outDec = await tokenDecimals(client, token.address, log);
       premium = poolPremiumPercent(usd / Number(formatUnits(quote.amountOut, outDec)), c.snapshot.market.priceUsd);
     } catch (err) {
@@ -438,13 +473,8 @@ export async function tradingCycle({client, signer, config, catalog, ethUsd, now
     try {
       const decimals = await tokenDecimals(client, token.address, log);
       const before = await tokenBalance(client, token.address, signer.address);
-      await settled(client, await signer.send(buildApproveTx(CASH, amountIn)), `${sym} approve`);
-      const hash = await signer.send(buildSwapTx({
-        tokenIn: CASH, tokenOut: token.address, fee: quote.fee, amountIn,
-        amountOutMinimum: applySlippage(quote.amountOut, config.execution?.stockSlippageBps ?? 100),
-        recipient: signer.address, routerVariant: config.uniswap?.routerVariant,
-      }));
-      await settled(client, hash, `${sym} buy`);
+      const {hash} = await executeSwap({client, signer, config, quote, tokenIn: CASH, tokenOut: token.address, amountIn,
+        amountOutMinimum: applySlippage(quote.amountOut, config.execution?.stockSlippageBps ?? 100), label: `${sym} buy`});
       const after = await tokenBalance(client, token.address, signer.address);
       const qty = Number(formatUnits(after - before, decimals));
       if (!(qty > 0)) throw new Error(`${sym} buy ${hash} settled but no tokens arrived; not recording`);
@@ -485,19 +515,12 @@ export async function forceBuy({client, signer, config, catalog, symbol, usd, et
   const cashDec = await cashDecimals(client);
   const amountIn = toCash(usd, cashDec);
   const decimals = await tokenDecimals(client, token.address, log);
-  const quote = await bestQuote(client, {tokenIn: CASH, tokenOut: token.address, amountIn});
+  const quote = await bestVenueQuote(client, {tokenIn: CASH, tokenOut: token.address, amountIn, allowedHooks: config.uniswap?.v4?.allowedHooks ?? []}, log);
   const premium = poolPremiumPercent(usd / Number(formatUnits(quote.amountOut, decimals)), q.mid);
-  log(`${symbol}: pool ${premium >= 0 ? '+' : ''}${premium.toFixed(2)}% vs reference $${q.mid}, fee tier ${quote.fee}`);
+  log(`${symbol}: pool ${premium >= 0 ? '+' : ''}${premium.toFixed(2)}% vs reference $${q.mid}, ${quote.venue} fee tier ${quote.fee}`);
   const before = await tokenBalance(client, token.address, signer.address);
-  const approveHash = await signer.send(buildApproveTx(CASH, amountIn));
-  await settled(client, approveHash, `${symbol} approve`);
-  log(`approve: ${approveHash}`);
-  const hash = await signer.send(buildSwapTx({
-    tokenIn: CASH, tokenOut: token.address, fee: quote.fee, amountIn,
-    amountOutMinimum: applySlippage(quote.amountOut, config.execution?.stockSlippageBps ?? 100),
-    recipient: signer.address, routerVariant: config.uniswap?.routerVariant,
-  }));
-  const receipt = await settled(client, hash, `${symbol} buy`);
+  const {hash, receipt} = await executeSwap({client, signer, config, quote, tokenIn: CASH, tokenOut: token.address, amountIn,
+    amountOutMinimum: applySlippage(quote.amountOut, config.execution?.stockSlippageBps ?? 100), label: `${symbol} buy`});
   const after = await tokenBalance(client, token.address, signer.address);
   const qty = Number(formatUnits(after - before, decimals));
   if (!(qty > 0)) throw new Error(`swap mined (${hash}) but the token balance did not change; check the receipt`);
@@ -506,6 +529,52 @@ export async function forceBuy({client, signer, config, catalog, symbol, usd, et
   await savePositions(positions, config);
   log(`${symbol}: bought ${qty.toFixed(6)} for $${usd.toFixed(2)} in block ${receipt.blockNumber}, status ${receipt.status} (${hash})`);
   return {symbol, qty, usd, hash, block: Number(receipt.blockNumber), status: receipt.status, premium};
+}
+
+// An operator-directed live buy. Not a bypass: the same quote, venue choice,
+// premium guard, sizing floor and signer as the allocator's own buys, and
+// the position is recorded like any other, with a thesis that says who
+// asked for it. The allocator reviews it next cycle and may close it if it
+// does not earn its place. The premium cap can be raised for one order with
+// maxPremiumPercent, deliberately and in the log.
+export async function operatorBuy({client, signer, config, catalog, symbol, usd, note = 'operator-directed buy', maxPremiumPercent = null, now = new Date(), log = () => {}}) {
+  if (config.mode !== 'live' || !signer.live) throw new Error('operator buy needs live mode with a live signer');
+  if (config._fork || config._paper) throw new Error('operator buy is for the real chain; use fork:buy on a fork');
+  if (!(usd > 0)) throw new Error('usd must be positive');
+  const minOrder = config.policy?.sizing?.minOrderUsd ?? 5;
+  if (usd < minOrder) throw new Error(`$${usd} is below policy.sizing.minOrderUsd ($${minOrder})`);
+  const cap = config.policy?.maxOrderUsd;
+  if (cap != null && usd > cap) throw new Error(`$${usd} exceeds policy.maxOrderUsd ($${cap})`);
+  const token = resolveToken(catalog, symbol);
+  const positions = await loadPositions(config);
+  const ledger = await readLedger(config);
+  const book = deployable(ledger, config);
+  const q = await fetchQuote(symbol);
+  const priceBySymbol = {[symbol]: q.mid};
+  const held = valuePositions(positions, priceBySymbol);
+  let room = Math.max(0, book.deployableUsd - held.totalUsd);
+  const wallet = await cashBalance(client, signer.address);
+  room = Math.min(room, wallet.usd);
+  if (usd > room + 0.01) throw new Error(`$${usd} exceeds what the book may deploy right now ($${room.toFixed(2)}: ledger room vs $${wallet.usd.toFixed(2)} USDG in the wallet)`);
+  const cashDec = await cashDecimals(client);
+  const amountIn = toCash(usd, cashDec);
+  const decimals = await tokenDecimals(client, token.address, log);
+  const quote = await bestVenueQuote(client, {tokenIn: CASH, tokenOut: token.address, amountIn, allowedHooks: config.uniswap?.v4?.allowedHooks ?? []}, log);
+  const premium = poolPremiumPercent(usd / Number(formatUnits(quote.amountOut, decimals)), q.mid);
+  const maxPrem = maxPremiumPercent ?? config.policy?.maxPoolPremiumPercent ?? 2;
+  log(`${symbol}: reference $${q.mid}, pool ${premium >= 0 ? '+' : ''}${premium.toFixed(2)}% on ${quote.venue} (fee ${quote.fee}), cap ${maxPrem}%`);
+  if (premium > maxPrem) throw new Error(`${symbol} pool is ${premium.toFixed(2)}% over the reference, above the ${maxPrem}% cap; pass --max-premium to raise it for this order, knowingly`);
+  const before = await tokenBalance(client, token.address, signer.address);
+  const {hash, receipt} = await executeSwap({client, signer, config, quote, tokenIn: CASH, tokenOut: token.address, amountIn,
+    amountOutMinimum: applySlippage(quote.amountOut, config.execution?.stockSlippageBps ?? 100), label: `${symbol} buy`});
+  const after = await tokenBalance(client, token.address, signer.address);
+  const qty = Number(formatUnits(after - before, decimals));
+  if (!(qty > 0)) throw new Error(`${symbol} buy ${hash} settled but no tokens arrived; not recording`);
+  recordBuy(positions, {symbol, address: token.address, qty, costUsd: usd, priceUsd: q.mid, txHash: hash,
+    thesis: note, falsifier: 'the allocator reviews this position on its next cycle like any other', target: null, targetWeightPercent: null, at: now});
+  await savePositions(positions, config);
+  log(`${symbol}: bought ${qty.toFixed(6)} for $${usd.toFixed(2)} on ${quote.venue}, block ${receipt.blockNumber} (${hash})`);
+  return {symbol, qty, usd, hash, venue: quote.venue, premium, block: Number(receipt.blockNumber)};
 }
 
 export async function forceSell({client, signer, config, catalog, symbol, fraction = 1, ethUsd, now = new Date(), log = () => {}}) {
@@ -522,15 +591,10 @@ export async function forceSell({client, signer, config, catalog, symbol, fracti
   if (amountIn > heldOnChain) amountIn = heldOnChain;
   if (amountIn <= 0n) throw new Error(`nothing on-chain to sell for ${symbol}`);
   const sellQty = Math.min(p.qty, Number(formatUnits(amountIn, decimals)));
-  const quote = await bestQuote(client, {tokenIn: p.address, tokenOut: CASH, amountIn});
+  const quote = await bestVenueQuote(client, {tokenIn: p.address, tokenOut: CASH, amountIn, allowedHooks: config.uniswap?.v4?.allowedHooks ?? []}, log);
   const cashBefore = await cashBalance(client, signer.address);
-  await settled(client, await signer.send(buildApproveTx(p.address, amountIn)), `${symbol} approve`);
-  const hash = await signer.send(buildSwapTx({
-    tokenIn: p.address, tokenOut: CASH, fee: quote.fee, amountIn,
-    amountOutMinimum: applySlippage(quote.amountOut, config.execution?.stockSlippageBps ?? 100),
-    recipient: signer.address, routerVariant: config.uniswap?.routerVariant,
-  }));
-  const receipt = await settled(client, hash, `${symbol} sell`);
+  const {hash, receipt} = await executeSwap({client, signer, config, quote, tokenIn: p.address, tokenOut: CASH, amountIn,
+    amountOutMinimum: applySlippage(quote.amountOut, config.execution?.stockSlippageBps ?? 100), label: `${symbol} sell`});
   const cashAfter = await cashBalance(client, signer.address);
   const proceedsUsd = fromCash(cashAfter.raw - cashBefore.raw, cashAfter.decimals);
   if (!(proceedsUsd > 0)) throw new Error(`${symbol} sell ${hash} settled but no USDG arrived; not recording`);

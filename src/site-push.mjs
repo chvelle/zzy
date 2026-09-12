@@ -26,12 +26,34 @@ export const DEFAULT_PUSH = {
 
 export function pushConfig(config) { return {...DEFAULT_PUSH, ...(config.site?.push ?? {})}; }
 
-const state = {dataAt: -Infinity, dataHash: null, historyAt: -Infinity, historyHash: null, urls: {}, warned: false};
-export function _resetPushState() { Object.assign(state, {dataAt: -Infinity, dataHash: null, historyAt: -Infinity, historyHash: null, urls: {}, warned: false}); }
+const state = {dataAt: -Infinity, dataHash: null, historyAt: -Infinity, historyHash: null, urls: {}, warned: false, lastFail: null, lastFailAt: -Infinity};
+export function _resetPushState() { Object.assign(state, {dataAt: -Infinity, dataHash: null, historyAt: -Infinity, historyHash: null, urls: {}, warned: false, lastFail: null, lastFailAt: -Infinity}); }
+
+// The same failure is said once every ten minutes, not every push.
+function failOnce(log, msg, now) {
+  if (msg === state.lastFail && now - state.lastFailAt < 600_000) return;
+  state.lastFail = msg; state.lastFailAt = now; log(msg);
+}
 
 const hash = (s) => createHash('sha256').update(s).digest('hex').slice(0, 16);
 
-async function putBlob(pathname, body, {token, cacheSeconds, putImpl}) {
+// Two transports. Preferred: POST to the site's own /api/push with a shared
+// secret; the blob token stays on Vercel and is never in this machine's
+// .env. Fallback: the blob SDK with BLOB_READ_WRITE_TOKEN, for anyone who
+// does have the token.
+async function putBlob(pathname, body, {token, pushUrl, pushSecret, cacheSeconds, putImpl, fetchImpl = fetch}) {
+  if (pushUrl && pushSecret) {
+    const r = await fetchImpl(pushUrl, {
+      method: 'POST',
+      headers: {'content-type': 'application/json', 'x-zzy-push-secret': pushSecret},
+      body: JSON.stringify({pathname, body, cacheSeconds}),
+      signal: AbortSignal.timeout(15000),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(`push endpoint ${r.status}: ${j.error ?? 'no detail'}`);
+    if (!j.url) throw new Error('push endpoint returned no url');
+    return j.url;
+  }
   const put = putImpl ?? (await import('@vercel/blob')).put;
   const res = await put(pathname, body, {
     access: 'public', token,
@@ -44,14 +66,17 @@ async function putBlob(pathname, body, {token, cacheSeconds, putImpl}) {
 
 // Called after every local export. Decides whether the blob needs the file,
 // pushes it, and remembers the URL so vercel.json can be written.
-export async function pushSite({config, env = process.env, now = Date.now(), log = () => {}, putImpl = null, dataFile = 'site/data.json', historyFile = 'site/history.json'} = {}) {
+export async function pushSite({config, env = process.env, now = Date.now(), log = () => {}, putImpl = null, fetchImpl = fetch, dataFile = 'site/data.json', historyFile = 'site/history.json'} = {}) {
   const cfg = pushConfig(config);
-  const token = env.BLOB_READ_WRITE_TOKEN;
+  const pushUrl = env.SITE_PUSH_URL || (config.site?.push?.url ?? null);
+  const pushSecret = env.ZZY_PUSH_SECRET || null;
+  const token = env.BLOB_READ_WRITE_TOKEN && /^vercel_blob_rw_/.test(env.BLOB_READ_WRITE_TOKEN) ? env.BLOB_READ_WRITE_TOKEN : null;
   if (!cfg.enabled) return {skipped: 'disabled'};
-  if (!token) {
-    if (!state.warned) { state.warned = true; log('site push: BLOB_READ_WRITE_TOKEN not set; zzy.live will not update on its own (see the guide, section 7c)'); }
-    return {skipped: 'no token'};
+  if (!(pushUrl && pushSecret) && !token) {
+    if (!state.warned) { state.warned = true; log('site push: set ZZY_PUSH_SECRET (and SITE_PUSH_URL) or BLOB_READ_WRITE_TOKEN in .env, or zzy.live will not update on its own (guide, section 7c)'); }
+    return {skipped: 'no credentials'};
   }
+  const creds = {token, pushUrl, pushSecret, putImpl, fetchImpl};
   const out = {pushed: []};
 
   if (now - state.dataAt >= cfg.intervalSeconds * 1000) {
@@ -59,9 +84,9 @@ export async function pushSite({config, env = process.env, now = Date.now(), log
     const h = hash(body);
     if (h !== state.dataHash) {
       try {
-        state.urls.data = await putBlob('data.json', body, {token, cacheSeconds: cfg.cacheSeconds, putImpl});
+        state.urls.data = await putBlob('data.json', body, {...creds, cacheSeconds: cfg.cacheSeconds});
         state.dataAt = now; state.dataHash = h; out.pushed.push('data.json');
-      } catch (e) { log(`site push: data.json failed: ${e.message.split('\n')[0]}`); state.dataAt = now; }
+      } catch (e) { failOnce(log, `site push: data.json failed: ${e.message.split('\n')[0]} (will keep retrying quietly)`, now); state.dataAt = now; }
     } else state.dataAt = now;
   }
 
@@ -70,10 +95,10 @@ export async function pushSite({config, env = process.env, now = Date.now(), log
       const body = await readFile(historyFile, 'utf8');
       const h = hash(body);
       if (h !== state.historyHash) {
-        state.urls.history = await putBlob('history.json', body, {token, cacheSeconds: cfg.cacheSeconds, putImpl});
+        state.urls.history = await putBlob('history.json', body, {...creds, cacheSeconds: cfg.cacheSeconds});
         state.historyHash = h; out.pushed.push('history.json');
       }
-    } catch (e) { if (e.code !== 'ENOENT') log(`site push: history.json failed: ${e.message.split('\n')[0]}`); }
+    } catch (e) { if (e.code !== 'ENOENT') failOnce(log, `site push: history.json failed: ${e.message.split('\n')[0]}`, now); }
     state.historyAt = now;
   }
 

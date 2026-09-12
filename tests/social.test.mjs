@@ -164,3 +164,61 @@ test('bearish events are not posted, and never spun', async () => {
     assert.equal(r4.posted.length, 1);
   } finally { await rm(dir, {recursive: true}); }
 });
+
+test('a completed deferred buyback becomes its own settled post, and a parked buyback is not reported as zero', async () => {
+  const {eventsFromTick} = await import('../src/social.mjs');
+  const now = new Date('2026-09-12T00:05:00Z');
+  const evs = eventsFromTick({treasury: {acted: true, deferredBuyTxHash: '0xabc', deferredBuybackUsd: 145.9, deferredBuybackVenue: 'v4'}}, now);
+  const bb = evs.find(e => e.kind === 'buyback');
+  assert.ok(bb, 'buyback event present'); assert.equal(bb.boughtUsd, 145.9); assert.equal(bb.key, 'buyback:0xabc');
+  const evs2 = eventsFromTick({treasury: {acted: true, claimTxHash: '0xdef', claimUsd: 291.79, buybackUsd: 0, tradingUsd: 145.9, buybackDeferredUsd: 145.9}}, now);
+  const cl = evs2.find(e => e.kind === 'claim');
+  assert.equal(cl.buybackUsd, undefined); assert.equal(cl.buybackParkedUsd, 145.9);
+});
+
+test('a settled event the composer tries to SKIP is asked again, plainly', async () => {
+  const {socialAfterTick} = await import('../src/social.mjs');
+  const {mkdtemp, rm} = await import('node:fs/promises'); const {tmpdir} = await import('node:os'); const path = (await import('node:path')).default;
+  const dir = await mkdtemp(path.join(tmpdir(), 'zzy-soc-'));
+  try {
+    let calls = 0;
+    const fetchImpl = async (u, init) => {
+      if (String(u).includes('api.anthropic.com')) { calls++; const body = JSON.parse(init.body); const note = JSON.stringify(body.messages); return {ok: true, json: async () => ({content: [{type: 'text', text: calls === 1 ? 'SKIP' : 'claimed fees. half is set aside for the buyback, half to the book.'}]})}; }
+      return {ok: true, json: async () => ({data: {id: '1'}})};
+    };
+    const config = {social: {enabled: false, logPath: path.join(dir, 'log.json'), postBearish: false, postClaims: true}, mode: 'live'};
+    const r = await socialAfterTick({out: {treasury: {acted: true, claimTxHash: '0x1', claimUsd: 291, tradingUsd: 145, buybackDeferredUsd: 145}}, config, env: {ANTHROPIC_API_KEY: 't'}, fetchImpl, now: new Date('2026-09-12T00:05:00Z')});
+    assert.equal(calls, 2, 'asked twice');
+    assert.equal(r.composed?.length ?? r.posted?.length ?? 1, 1);
+  } finally { await rm(dir, {recursive: true}); }
+});
+
+test('routine claims and buybacks stay quiet; the first of each and ladder crossings post once', async () => {
+  const {milestoneEvents, socialAfterTick, socialConfig} = await import('../src/social.mjs');
+  const cfg = socialConfig({});
+  const ledger = {entries: [
+    {type: 'fee-claim', claimUsd: 291.79, buybackUsd: 0, tradingUsd: 145.9},
+    {type: 'buyback-settled', usd: 145.9},
+    {type: 'fee-claim', claimUsd: 400, buybackUsd: 200, tradingUsd: 200},
+    {type: 'realized-pnl', amountUsd: 120},
+  ]};
+  const evs = milestoneEvents({ledger, tradesCount: 12, cfg});
+  const keys = evs.map(e => e.key);
+  assert.ok(keys.includes('milestone:first-claim'));
+  assert.ok(keys.includes('milestone:first-buyback'));
+  assert.ok(keys.includes('milestone:creator fees claimed, lifetime:500'), 'fees 691.79 crossed 500');
+  assert.ok(!keys.includes('milestone:creator fees claimed, lifetime:1000'));
+  assert.ok(keys.includes('milestone:realized profit, lifetime:100'));
+  assert.ok(keys.includes('milestone:trades completed:10') && keys.includes('milestone:trades completed:1'));
+  assert.ok(!keys.includes('milestone:$ZZY held, lifetime, never sold:500'), '345.9 held, not yet 500');
+  // a plain claim event is filtered out by default
+  const {mkdtemp, rm} = await import('node:fs/promises'); const {tmpdir} = await import('node:os'); const path = (await import('node:path')).default;
+  const dir = await mkdtemp(path.join(tmpdir(), 'zzy-ms-'));
+  try {
+    const composed = [];
+    const fetchImpl = async (u, init) => { if (String(u).includes('anthropic')) { composed.push(JSON.parse(init.body).messages[0].content); return {ok: true, json: async () => ({content: [{type: 'text', text: 'a plain line.'}]})}; } return {ok: true, json: async () => ({})}; };
+    const config = {social: {enabled: false, logPath: path.join(dir, 'log.json')}, mode: 'live'};
+    await socialAfterTick({out: {treasury: {acted: true, claimTxHash: '0x1', claimUsd: 50, buybackUsd: 25, tradingUsd: 25}}, config, env: {ANTHROPIC_API_KEY: 't'}, fetchImpl, now: new Date('2026-09-12T00:05:00Z')});
+    assert.ok(!composed.some(c => /"kind":"claim"/.test(c)), 'the routine claim did not post');
+  } finally { await rm(dir, {recursive: true}); }
+});

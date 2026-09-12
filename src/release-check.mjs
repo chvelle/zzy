@@ -8,6 +8,7 @@
 import {readdir, readFile, stat} from 'node:fs/promises';
 import path from 'node:path';
 import {ADDRESSES} from './chain.mjs';
+import {PONS_V2, UNISWAP_V4} from './adapters/pons-v2.mjs';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.vercel']);
 const TEXT = /\.(mjs|js|json|md|html|txt|example|yml|yaml|css)$/;
@@ -27,10 +28,12 @@ const PATTERNS = [
   ['session token in a URL', /token=[A-Za-z0-9_-]{20,}/],
 ];
 
-const KNOWN_ADDRESSES = new Set(Object.values(ADDRESSES).map(a => a.toLowerCase()));
+const KNOWN_ADDRESSES = new Set([...Object.values(ADDRESSES), ...Object.values(PONS_V2), ...Object.values(UNISWAP_V4)].map(a => a.toLowerCase()));
 const ALLOWED_EMAILS = [/example\.com$/, /you@/, /t@t\.t/, /^i@izs\.me$/];
 // Anvil's published test accounts. Public by design, used only on the fork.
 const ANVIL_KEYS = ['0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80', '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d'];
+// Event topics are 32-byte hashes and look like keys; the known ones are not.
+const KNOWN_TOPICS = ['0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438'];
 
 async function* walk(dir) {
   for (const e of await readdir(dir, {withFileTypes: true})) {
@@ -60,12 +63,15 @@ export async function releaseCheck({root = '.', catalogPath = 'data/stock-token-
       for (const m of text.matchAll(new RegExp(re.source, 'g' + re.flags.replace('g', '')))) {
         const hit = m[0];
         if (kind === 'email address' && ALLOWED_EMAILS.some(p => p.test(hit))) continue;
-        if (kind === 'private key' && ANVIL_KEYS.includes(hit.toLowerCase())) continue;
+        if (kind === 'private key' && (ANVIL_KEYS.includes(hit.toLowerCase()) || KNOWN_TOPICS.includes(hit.toLowerCase()))) continue;
         findings.push({file: rel, kind, sample: hit.slice(0, 6) + '…'});
       }
     }
+    // the token itself, baked into the page, is public by definition
+    const bakedCa = rel === 'site/index.html' ? (text.match(/DEFAULT_CA = "(0x[0-9a-fA-F]{40})"/)?.[1] ?? null) : null;
     // wallet addresses that are not contracts we know
     for (const m of text.matchAll(/\b0x[0-9a-fA-F]{40}\b/g)) {
+      if (bakedCa && m[0].toLowerCase() === bakedCa.toLowerCase()) continue;
       const a = m[0].toLowerCase();
       if (KNOWN_ADDRESSES.has(a) || catalogAddrs.has(a)) continue;
       if (/^0x(0+|1+|2+|3+|9+|a+|d+)$/i.test(a) || /^0x(1111|2222|3333|9999|dead)/i.test(a)) continue;   // test fixtures

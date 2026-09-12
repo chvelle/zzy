@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {recordBuy, recordSell, valuePositions, listPositions} from '../src/positions.mjs';
+import {recordBuy, recordSell, valuePositions, listPositions, countFills} from '../src/positions.mjs';
 
 const store = () => ({schemaVersion: 1, positions: {}});
 const at = new Date('2026-09-09T00:00:00Z');
@@ -58,4 +58,14 @@ test('valuation marks to the latest price and totals exposure', () => {
   const nvda = v.rows.find(r => r.symbol === 'NVDA');
   assert.equal(nvda.unrealizedUsd, 20);
   assert.ok(Math.abs(nvda.unrealizedPercent - 10) < 1e-9);
+});
+
+test('trades are counted from settled fills, and a closed position keeps its history', () => {
+  const store = {positions: {}};
+  recordBuy(store, {symbol: 'NVDA', address: '0x1', qty: 1, costUsd: 100, priceUsd: 100, txHash: '0xa', at: new Date('2026-09-12T00:00:00Z')});
+  assert.equal(countFills(store), 1);
+  recordSell(store, {symbol: 'NVDA', qty: 1, proceedsUsd: 110, priceUsd: 110, txHash: '0xb', at: new Date('2026-09-12T01:00:00Z')});
+  assert.equal(store.positions.NVDA, undefined);
+  assert.equal(store.closed.length, 1);
+  assert.equal(countFills(store), 2, 'the buy and the sell survive the close');
 });

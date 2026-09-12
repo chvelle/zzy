@@ -68,6 +68,9 @@ export function recordSell(store, {symbol, qty, proceedsUsd, priceUsd, txHash, a
   const remainingQty = p.qty - qty;
   const fill = {side: 'sell', qty, usd: proceedsUsd, priceUsd, txHash, realizedUsd, at: at.toISOString()};
   if (remainingQty <= 1e-12) {
+    // A closed position keeps its record: the fills are the trade history
+    // and the count of real orders comes from them, not from verdicts.
+    store.closed = [...(store.closed ?? []), {...p, qty: 0, closedAt: at.toISOString(), fills: [...p.fills, fill]}].slice(-500);
     delete store.positions[symbol];
   } else {
     store.positions[symbol] = {
@@ -101,4 +104,12 @@ export function valuePositions(store, priceBySymbol) {
     };
   });
   return {rows, totalUsd, totalCostUsd: totalCost, pricedCostUsd: pricedCost, unpricedCount: unpriced, count: rows.length};
+}
+
+// Settled stock orders, lifetime: every buy and sell fill on open and closed
+// positions. This is what "trades" means anywhere it is counted.
+export function countFills(store) {
+  const open = Object.values(store?.positions ?? {}).reduce((n, pos) => n + (pos.fills?.length ?? 0), 0);
+  const closed = (store?.closed ?? []).reduce((n, pos) => n + (pos.fills?.length ?? 0), 0);
+  return open + closed;
 }

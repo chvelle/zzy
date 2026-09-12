@@ -291,3 +291,43 @@ test('SECURITY: verdict overrides are ignored outside a fork', async () => {
   assert.throws(() => r.setForkVerdict('NVDA', 'PREPARE'), /only exist on a local fork/);
   assert.throws(() => r.setForkExit('NVDA', 'CLOSE'), /only exist on a local fork/);
 });
+
+test('an operator buy goes through the normal path: venue quote, premium cap, signer, position, and refuses outside live', async () => {
+  _resetCashDecimals();
+  const {operatorBuy} = await import('../src/engine.mjs');
+  const dir = await mkdtemp(path.join(tmpdir(), 'zzy-opbuy-'));
+  try {
+    const now = new Date('2026-09-12T01:00:00Z');
+    const config = {mode: 'live', uniswap: {routerVariant: 'SwapRouter02'}, execution: {}, policy: {maxTotalExposureUsd: 250, maxOrderUsd: null, maxPoolPremiumPercent: 2, sizing: {minOrderUsd: 5}},
+      treasury: {ledgerPath: path.join(dir, 'l.json')}, positions: {path: path.join(dir, 'p.json')}, catalog: {path: path.join(dir, 'c.json'), requireVerified: false}};
+    await writeFile(config.treasury.ledgerPath, JSON.stringify({schemaVersion: 1, entries: [{type: 'deposit', at: now.toISOString(), tradingUsd: 145.9}]}));
+    const catalog = {verified: true, fetchedAt: now.toISOString(), symbols: [{symbol: 'CRM', name: 'Salesforce', address: '0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC'}]};
+    const sent = [];
+    const signer = {live: true, address: '0x3333333333333333333333333333333333333333', async send(tx) { sent.push(tx); return '0xh' + sent.length; }};
+    let tok = 0n;
+    const client = {
+      async readContract({address, functionName}) { const a = address.toLowerCase(); if (functionName === 'decimals') return a === '0x5fc5360d0400a0fd4f2af552add042d716f1d168' ? 6 : 18; if (a === '0x5fc5360d0400a0fd4f2af552add042d716f1d168') return 145_900_000n; if (functionName === 'allowance') return 10n ** 30n; return tok; },
+      async simulateContract({address, args}) { if (address.toLowerCase() === '0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7') throw new Error('no v3'); return {result: [args[0].exactAmount * 10n ** 12n / 250n, 0n]}; },
+      async waitForTransactionReceipt() { tok = 8n * 10n ** 16n; return {status: 'success', blockNumber: 5n}; },
+      async getBlockNumber() { return 1n; }, async getLogs() { return []; },
+    };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => String(url).includes('rhj/prices')
+      ? {ok: true, json: async () => ({quotes: [{tokenSymbol: 'CRM', bid: '249', ask: '251', dailyTradingVolume: '1', generatedAt: now.toISOString()}]})}
+      : {ok: false, json: async () => ({}), text: async () => ''};
+    try {
+      const lines = [];
+      const r = await operatorBuy({client, signer, config, catalog, symbol: 'CRM', usd: 20, now, log: m => lines.push(m)});
+      assert.equal(r.venue, 'v4'); assert.equal(r.qty, 0.08);
+      assert.ok(lines.some(l => /pool \+0\.00%/.test(l)), 'premium reported');
+      const {loadPositions} = await import('../src/positions.mjs');
+      const p = (await loadPositions(config)).positions.CRM;
+      assert.equal(p.thesis, 'operator-directed buy');
+      // premium cap: a pool 10% over the reference is refused unless raised knowingly
+      const dear = {...client, async simulateContract({address, args}) { if (address.toLowerCase() === '0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7') throw new Error('no v3'); return {result: [args[0].exactAmount * 10n ** 12n / 275n, 0n]}; }};
+      await assert.rejects(operatorBuy({client: dear, signer, config, catalog, symbol: 'CRM', usd: 20, now}), /above the 2% cap/);
+      // not in live: refused before anything
+      await assert.rejects(operatorBuy({client, signer: {live: false}, config: {...config, mode: 'preview'}, catalog, symbol: 'CRM', usd: 20, now}), /live mode/);
+    } finally { globalThis.fetch = realFetch; }
+  } finally { await rm(dir, {recursive: true}); }
+});

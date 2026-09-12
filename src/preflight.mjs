@@ -1,4 +1,4 @@
-import {parseUnits, toFunctionSelector, encodeFunctionData, parseEther, formatEther, parseAbi, getAddress} from 'viem';
+import {parseUnits, formatUnits, toFunctionSelector, encodeFunctionData, parseEther, formatEther, parseAbi, getAddress} from 'viem';
 import {ADDRESSES, ERC20_ABI, WETH_ABI, SWAP_ROUTER_ABI, QUOTER_V2_ABI, PONS_POOL_FEE} from './chain.mjs';
 
 // Preflight.
@@ -184,8 +184,21 @@ export async function preflight(client, config, {account = null, testUsd = 5, et
   if (tokenOut) {
     add(`${symbol} token deployed`, await checkDeployed(client, symbol, tokenOut));
     // Stock tokens trade against USDG. A WETH pool is not what the bot uses.
+    // Both venues are shown; the engine takes the better quote at trade time.
     pool = await checkPool(client, {tokenIn: ADDRESSES.USDG, tokenOut, amountIn: cashIn});
-    add(`USDG -> ${symbol} pool quotes`, pool);
+    add(`USDG -> ${symbol} v3 quote`, pool.ok ? pool : {...pool, ok: true, skipped: true, detail: (pool.detail ?? 'no v3 pool') + ' (v3 is optional; v4 below is where most names trade)'});
+    try {
+      const {bestV4Quote, discoverV4Pools} = await import('./adapters/uniswap-v4.mjs');
+      const found = await discoverV4Pools(client, ADDRESSES.USDG, tokenOut).catch(() => []);
+      add(`${symbol} v4 pools on chain`, found.length
+        ? {ok: true, detail: found.map(p => `fee ${p.fee}/${p.tickSpacing}${p.hooks && p.hooks !== '0x0000000000000000000000000000000000000000' ? ' hook ' + p.hooks.slice(0, 10) + '…' : ''}`).join('; ')}
+        : {ok: true, skipped: true, detail: 'none found by discovery; standard configs will be tried'});
+      const notes = [];
+      const v4 = await bestV4Quote(client, {tokenIn: ADDRESSES.USDG, tokenOut, amountIn: cashIn, allowedHooks: config.uniswap?.v4?.allowedHooks ?? [], log: m => notes.push(m)});
+      for (const n of notes) add('v4 note', {ok: true, skipped: true, detail: n});
+      add(`USDG -> ${symbol} v4 quote`, v4 ? {ok: true, detail: `pool at fee ${v4.fee}/${v4.tickSpacing}, quotes ${formatUnits(v4.amountOut, 18)} out for ${testUsd} USDG`} : {ok: false, detail: 'no v4 pool quotes either'});
+      if (!pool.ok && v4) pool = {ok: true, fee: null, v4};
+    } catch (e) { add(`USDG -> ${symbol} v4 quote`, {ok: false, detail: e.message.split('\n')[0]}); }
   } else {
     add('Catalog token', {ok: false, detail: 'no instrument with an address in the catalog; run npm run catalog:refresh'});
   }
@@ -194,12 +207,52 @@ export async function preflight(client, config, {account = null, testUsd = 5, et
     add('Wallet balances', await checkBalances(client, account));
     add('Wrap ETH', await checkWrap(client, account, amountIn));
     add('Approve WETH', await checkApprove(client, account, amountIn));
-    if (cashPool?.ok && variant) add('Swap WETH -> USDG', await checkSwap(client, account, {tokenIn: ADDRESSES.WETH, tokenOut: ADDRESSES.USDG, fee: cashPool.fee, amountIn, variant, label: 'swap WETH -> USDG (fund the book)'}));
-    add('Approve USDG', await checkApprove(client, account, cashIn, ADDRESSES.USDG, 'USDG approve -> router'));
-    if (tokenOut && pool?.ok && variant) {
-      add('Swap', await checkSwap(client, account, {tokenIn: ADDRESSES.USDG, tokenOut, fee: pool.fee, amountIn: cashIn, variant, label: `swap USDG -> ${symbol} (buy)`}));
+    // A swap simulation needs the wallet to actually hold the input token;
+    // an empty wallet fails with Uniswap's "STF" and that is not a bug. Skip
+    // with a reason instead of failing, and re-run once cash has arrived.
+    const wethHeld = await client.readContract({address: ADDRESSES.WETH, abi: ERC20_ABI, functionName: 'balanceOf', args: [account]}).catch(() => 0n);
+    const usdgHeld = await client.readContract({address: ADDRESSES.USDG, abi: ERC20_ABI, functionName: 'balanceOf', args: [account]}).catch(() => 0n);
+    if (cashPool?.ok && variant) {
+      add('Swap WETH -> USDG', wethHeld >= amountIn
+        ? await checkSwap(client, account, {tokenIn: ADDRESSES.WETH, tokenOut: ADDRESSES.USDG, fee: cashPool.fee, amountIn, variant, label: 'swap WETH -> USDG (fund the book)'})
+        : {ok: true, skipped: true, detail: 'no WETH in the wallet to simulate with; only needed for a V1 token'});
     }
-    add('Claim fees', await checkClaim(client, account, config));
+    add('Approve USDG', await checkApprove(client, account, cashIn, ADDRESSES.USDG, 'USDG approve -> router'));
+    if (tokenOut && pool?.ok && pool.fee != null && variant) {
+      add('Swap', usdgHeld >= cashIn
+        ? await checkSwap(client, account, {tokenIn: ADDRESSES.USDG, tokenOut, fee: pool.fee, amountIn: cashIn, variant, label: `swap USDG -> ${symbol} (buy)`})
+        : {ok: true, skipped: true, detail: `no USDG in the wallet yet; re-run preflight after the first claim to simulate a stock buy for real`});
+    }
+    // Pons V2: the claim is documented, so it can be checked for real.
+    let v2launch = null;
+    try {
+      const {readLaunch, escrowOwed, buildClaimTx, quoteCurveBuy, quoteV4Buy, PHASE, fmt} = await import('./adapters/pons-v2.mjs');
+      const {zeroAddress, formatUnits} = await import('viem');
+      const token = config.treasury?.zzyTokenAddress;
+      const launch = token ? await readLaunch(client, token, config.pons?.v2?.factory).catch(() => null) : null;
+      v2launch = launch;
+      if (launch) {
+        const pairDec = launch.native ? 18 : Number(await client.readContract({address: launch.pairToken, abi: ERC20_ABI, functionName: 'decimals'}).catch(() => 18));
+        const probe = 10n ** BigInt(pairDec) / 1000n;   // 0.001 of the quote asset, in its own decimals
+        const pairName = launch.native ? 'ETH' : (launch.pairToken.toLowerCase() === ADDRESSES.USDG.toLowerCase() ? 'USDG' : 'the pair token');
+        add('Pons V2 launch', {ok: true, detail: `${launch.phaseName}; quote ${launch.native ? 'ETH' : launch.pairToken}; creator fees to ${launch.creatorFeeRecipient}`});
+        add('Creator fees reach this wallet', launch.creatorFeeRecipient.toLowerCase() === account.toLowerCase()
+          ? {ok: true, detail: 'yes'} : {ok: false, detail: `fees go to ${launch.creatorFeeRecipient}, not ${account}`});
+        const owed = await escrowOwed(client, account, launch.native ? zeroAddress : launch.pairToken, config.pons?.v2?.escrow);
+        add('V2 escrow balance', {ok: true, detail: `${formatUnits(owed, pairDec)} ${pairName} owed`});
+        const claimTx = buildClaimTx(launch.native ? zeroAddress : launch.pairToken, config.pons?.v2?.escrow);
+        add('V2 escrow claim', owed > 0n ? await simulate(client, {account, to: claimTx.to, data: claimTx.data}) : {ok: true, skipped: true, detail: 'nothing owed yet, claim not simulated'});
+        if (launch.phase === PHASE.NotGraduated) {
+          const q = await quoteCurveBuy(client, launch.curve, probe, account).catch(e => ({error: e.message}));
+          add('V2 curve quote', q.error ? {ok: false, detail: q.error.split('\n')[0]} : {ok: q.tokensOut > 0n, detail: `${fmt(q.tokensOut).toLocaleString('en-US', {maximumFractionDigits: 0})} $ZZY for 0.001 ${pairName}`});
+        } else if (launch.phase === PHASE.PoolCreated) {
+          const q = await quoteV4Buy(client, launch, probe).catch(e => ({error: e.message}));
+          add('V2 v4 pool quote', q.error ? {ok: false, detail: q.error.split('\n')[0]} : {ok: q.amountOut > 0n, detail: `${fmt(q.amountOut).toLocaleString('en-US', {maximumFractionDigits: 0})} $ZZY for 0.001 ${pairName}`});
+        }
+      }
+    } catch (e) { add('Pons V2 checks', {ok: false, detail: e.message.split('\n')[0]}); }
+    // The V1 claim only applies to a V1 token.
+    add('Claim fees (V1)', v2launch ? {ok: true, skipped: true, detail: 'V2 token; the V2 escrow claim above is the real check'} : await checkClaim(client, account, config));
   }
 
   const failed = checks.filter(c => !c.ok && !c.skipped);

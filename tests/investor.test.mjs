@@ -87,6 +87,6 @@ test('the review sees the market, the news on what it holds, and its own noteboo
   assert.match(user, /Tesla Q3 deliveries beat/, 'news on the holding reaches the review');
   assert.match(user, /buy if it holds 150/, 'the notebook reaches the review');
   assert.match(body.system, /every fee claim is a paycheque/);
-  assert.match(body.system, /cash is not a problem to be solved by buying something/i);
+  assert.match(body.system, /the posture is the operator's call, not yours/);
   assert.match(body.system, /Subtract the market before reading the stock/);
 });

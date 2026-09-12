@@ -78,3 +78,15 @@ test('the $ZZY position reports as never sold and never sellable', () => {
   assert.equal(held.everSold, false);
   assert.equal(held.sellPossible, false);
 });
+
+test('a deferred buyback that settled later counts toward $ZZY bought back, even an older record with no usd', () => {
+  const ledger = {entries: [
+    {type: 'fee-claim', claimUsd: 291.79, buybackUsd: 0, tradingUsd: 145.9},
+    {type: 'buyback-settled', amount: '145895638', asset: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', txHash: '0xc5'},
+    {type: 'fee-claim', claimUsd: 100, buybackUsd: 50, tradingUsd: 50},
+    {type: 'buyback-settled', amount: '1', asset: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', usd: 25, txHash: '0xc6'},
+  ]};
+  const z = zzyHeldForever(ledger);
+  assert.equal(z.totalBoughtUsd, 220.895638);
+  assert.equal(z.disposition, 'burned');
+});

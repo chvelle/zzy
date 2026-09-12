@@ -40,9 +40,11 @@
     "model": "claude-sonnet-5",
     "webSearchToolType": "web_search_20260209",
     "intervalSeconds": 300,
+    "posture": "balanced",
     "maxCandidatesPerCycle": 6,
     "minInterestScore": 5,
     "maxSearchesPerCycle": 4,
+    "maxOutputTokens": 16000,
     "timeoutMs": 240000,
     "_note": "The review is the only thing that costs money. intervalSeconds applies in regular hours, Extended in pre/after-hours, Closed overnight and weekends. With skipIfNothingNew the model is only called when the inputs changed since the last review (new filing, headline, note, cash, or a holding moving materialMovePercent). maxCandidatesPerCycle and maxSearchesPerCycle bound the bill per review.",
     "intervalSecondsExtended": 900,
@@ -63,6 +65,13 @@
     "ledgerPath": "treasury/ledger.json"
   },
   "pons": {
+    "version": "auto",
+    "claimThresholdUsd": 20,
+    "v2": {
+      "factory": "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e",
+      "escrow": "0xd3AFEB2a57f70eF218Aa82451c51B2fb0416Ac9e",
+      "_note": "Pons V2 (docs.ponsfamily.com/v2). Fees are claimed from the escrow in the launch quote asset; $ZZY is bought on the curve until graduation, then on the Uniswap v4 pool via the Universal Router. version: auto asks the V2 factory whether it knows the token; v1 or v2 forces it. claimThresholdUsd: claim when the escrow owes at least this much."
+    },
     "locker": "0x736D76699C26D0d966744cAe304C000d471f7F35",
     "factory": "0xA5aAb3F0c6EeadF30Ef1D3Eb997108E976351feB",
     "claimThresholdEth": 0.42,
@@ -79,7 +88,11 @@
   },
   "uniswap": {
     "routerVariant": null,
-    "_note": "Set to \"SwapRouter\" or \"SwapRouter02\" after checking the verified source at robinhoodchain.blockscout.com/address/0xCaf681a66D020601342297493863E78C959E5cb2. The signer refuses every swap until this is set."
+    "_note": "Set to \"SwapRouter\" or \"SwapRouter02\" after checking the verified source at robinhoodchain.blockscout.com/address/0xCaf681a66D020601342297493863E78C959E5cb2. The signer refuses every swap until this is set.",
+    "v4": {
+      "allowedHooks": [],
+      "_note": "v4 pools for a pair are discovered from the chain (PoolManager Initialize events). Hookless pools are always usable. A pool on a hook is quoted and reported but not used unless its hook address is listed here; verify the hook contract on Blockscout first."
+    }
   },
   "execution": {
     "slippageBps": 300,
@@ -116,7 +129,8 @@
       "intervalSeconds": 30,
       "historySeconds": 300,
       "cacheSeconds": 60,
-      "_note": "Pushes data.json and history.json to Vercel Blob when they change, so the static site at zzy.live updates on its own. Needs BLOB_READ_WRITE_TOKEN in .env. Worst-case staleness is cacheSeconds plus the page poll."
+      "_note": "Pushes data.json and history.json so the static site updates on its own. Preferred: the site's own /api/push with ZZY_PUSH_SECRET in .env (the blob token stays on Vercel). Fallback: BLOB_READ_WRITE_TOKEN in .env. Worst-case staleness is cacheSeconds plus the page poll.",
+      "url": "https://zzy.live/api/push"
     }
   },
   "exitPolicy": {
@@ -175,6 +189,51 @@
     "safetyCapPerDay": 60,
     "softEveryHours": 6,
     "postBearish": false,
+    "postClaims": false,
+    "postBuybacks": false,
+    "milestones": {
+      "zzyHeldUsd": [
+        500,
+        1000,
+        2500,
+        5000,
+        10000,
+        25000,
+        50000,
+        100000
+      ],
+      "feesClaimedUsd": [
+        500,
+        1000,
+        2500,
+        5000,
+        10000,
+        25000,
+        50000,
+        100000
+      ],
+      "profitUsd": [
+        100,
+        500,
+        1000,
+        2500,
+        5000,
+        10000,
+        25000,
+        50000,
+        100000
+      ],
+      "trades": [
+        1,
+        10,
+        50,
+        100,
+        250,
+        500,
+        1000
+      ],
+      "_note": "Claims and buybacks post only the first time and when a lifetime total crosses one of these lines. Trades always post. postClaims/postBuybacks true makes every one post."
+    },
     "creator": "Ozzy, also known as MeadGod, the creator of Pons",
     "dailyReportHourUtc": 21,
     "logPath": "data/social-log.json",

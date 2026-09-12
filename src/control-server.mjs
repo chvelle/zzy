@@ -49,6 +49,7 @@ export const EDITABLE = {
   'social.safetyCapPerDay':        {type: 'number', min: 1, max: 500},
   'social.softEveryHours':         {type: 'number', min: 1, max: 168},
   'social.postBearish':            {type: 'boolean'},
+  'research.posture':              {type: 'enum', values: ['patient', 'balanced', 'active']},
   'research.maxCandidatesPerCycle':{type: 'number', min: 1, max: 30},
   'research.minInterestScore':     {type: 'number', min: 0, max: 100},
   'research.maxSearchesPerCycle':  {type: 'number', min: 0, max: 20},

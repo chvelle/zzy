@@ -1,6 +1,7 @@
-import {createWalletClient, http, decodeFunctionData, getAddress, isAddress, toFunctionSelector} from 'viem';
+import {createWalletClient, http, decodeFunctionData, decodeAbiParameters, getAddress, isAddress, toFunctionSelector, zeroAddress} from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
 import {ROBINHOOD_CHAIN, ADDRESSES, ERC20_ABI, WETH_ABI, SWAP_ROUTER_ABI} from '../chain.mjs';
+import {PONS_V2, UNISWAP_V4, V2_ESCROW_ABI, V2_CURVE_ABI, UNIVERSAL_ROUTER_ABI, PERMIT2_ABI, UR_COMMAND_V4_SWAP, V4_ACTION, RH_V4_SWAP_EXACT_IN_SINGLE, readLaunch} from './pons-v2.mjs';
 
 // The one place in this codebase that can sign. Everything that wants a
 // signature goes through guard() first, and guard() decodes the calldata and
@@ -27,6 +28,13 @@ const eq = (a, b) => isAddress(a) && isAddress(b) && getAddress(a) === getAddres
 // Pure and synchronous so it can be unit-tested without a chain.
 export function guard(tx, ctx) {
   const {zzyTokenAddress, allowedStockTokens = [], maxValueWei = 0n, ponsLocker = ADDRESSES.PONS_LOCKER, routerVariant} = ctx;
+  // Pons V2 surfaces. ctx.ponsV2 is set by the signer itself from the V2
+  // factory (see resolvePonsV2); until it is, every V2 destination is refused.
+  const v2 = ctx.ponsV2 ?? null;
+  const v2Escrow = v2?.escrow ?? PONS_V2.FEE_ESCROW;
+  const v2Curve = v2?.curve ?? null;
+  const v2Pair = v2?.pairToken ?? null;   // zero address for a native launch
+  const v2PairIsErc20 = v2Pair && !eq(v2Pair, zeroAddress);
   if (!zzyTokenAddress) throw new SignerGuardError('zzyTokenAddress not configured -- cannot evaluate whether a tx touches $ZZY');
   if (!tx?.to || !isAddress(tx.to)) throw new SignerGuardError('tx.to is not a valid address');
 
@@ -40,24 +48,35 @@ export function guard(tx, ctx) {
   //    no legitimate reason for the signer to ever target this contract.
   if (eq(to, zzyTokenAddress)) throw new SignerGuardError('tx targets the $ZZY token contract itself -- no signed call to $ZZY is ever permitted');
 
-  // 2. Native ETH may only go to WETH (deposit) or nothing. No bare sends.
-  if (value > 0n && !eq(to, ADDRESSES.WETH) && !eq(to, ADDRESSES.UNISWAP_SWAP_ROUTER)) {
-    throw new SignerGuardError('native ETH transfer to an address other than WETH/router');
-  }
+  // 2. Native ETH may only go to WETH (deposit), the v3 router, the launch's
+  //    own curve (a native buy), or the Universal Router (a native v4 buy).
+  //    No bare sends anywhere.
+  const nativeOk = eq(to, ADDRESSES.WETH) || eq(to, ADDRESSES.UNISWAP_SWAP_ROUTER) || (v2Curve && eq(to, v2Curve)) || eq(to, UNISWAP_V4.UNIVERSAL_ROUTER);
+  if (value > 0n && !nativeOk) throw new SignerGuardError('native ETH transfer to an address other than WETH/router/curve/universal router');
   if (value > maxValueWei) throw new SignerGuardError(`tx value ${value} exceeds per-tx cap ${maxValueWei}`);
 
-  // 3. Destination allowlist: WETH, USDG, router, pons locker, allowed stock tokens.
-  const allowedTargets = [ADDRESSES.WETH, ADDRESSES.USDG, ADDRESSES.UNISWAP_SWAP_ROUTER, ponsLocker, ...allowedStockTokens];
+  // 3. Destination allowlist: WETH, USDG, v3 router, pons v1 locker, allowed
+  //    stock tokens, and (once resolved) the v2 escrow, curve, Universal
+  //    Router and Permit2.
+  const allowedTargets = [ADDRESSES.WETH, ADDRESSES.USDG, ADDRESSES.UNISWAP_SWAP_ROUTER, ponsLocker, ...allowedStockTokens,
+    UNISWAP_V4.UNIVERSAL_ROUTER, UNISWAP_V4.PERMIT2,
+    ...(v2 ? [v2Escrow, ...(v2Curve ? [v2Curve] : [])] : [])];
   if (!allowedTargets.some(a => eq(a, to))) throw new SignerGuardError(`destination ${to} is not on the allowlist`);
 
   // 4. Decode what the call actually does and check the direction.
   if (data === '0x') return true; // bare value to WETH/router only, already checked
 
+  // The spenders an ERC-20 may ever be approved to: the v3 router, the
+  // launch's own curve, and Permit2 (which only the Universal Router draws
+  // on, and only per our own Permit2.approve). $ZZY is never approved to
+  // anyone: rule 1 already refused any call targeting it.
+  const spenderOk = (sp) => eq(sp, ADDRESSES.UNISWAP_SWAP_ROUTER) || (v2Curve && eq(sp, v2Curve)) || eq(sp, UNISWAP_V4.PERMIT2);
+
   if (eq(to, ADDRESSES.WETH)) {
     const {functionName} = decodeSafely([...WETH_ABI, ...ERC20_ABI], data);
     if (functionName === 'approve') {
       const {args} = decodeSafely(ERC20_ABI, data);
-      if (!eq(args[0], ADDRESSES.UNISWAP_SWAP_ROUTER)) throw new SignerGuardError('WETH approve to a spender other than the router');
+      if (!spenderOk(args[0])) throw new SignerGuardError('WETH approve to a spender other than the router/curve/Permit2');
       return true;
     }
     if (functionName === 'deposit') return true;
@@ -68,16 +87,16 @@ export function guard(tx, ctx) {
   if (eq(to, ADDRESSES.USDG)) {
     // The book's cash. Only ever approved to the router, never transferred.
     const {functionName, args} = decodeSafely(ERC20_ABI, data);
-    if (functionName === 'approve' && eq(args[0], ADDRESSES.UNISWAP_SWAP_ROUTER)) return true;
-    throw new SignerGuardError(`USDG call ${functionName} is not permitted (only approve->router)`);
+    if (functionName === 'approve' && spenderOk(args[0])) return true;
+    throw new SignerGuardError(`USDG call ${functionName} is not permitted (only approve->router/curve/Permit2)`);
   }
 
   if (allowedStockTokens.some(a => eq(a, to))) {
     const {functionName, args} = decodeSafely(ERC20_ABI, data);
     // Stock tokens may be approved to the router (so they can be sold).
     // That's a legitimate sale of a stock token, not of $ZZY.
-    if (functionName === 'approve' && eq(args[0], ADDRESSES.UNISWAP_SWAP_ROUTER)) return true;
-    throw new SignerGuardError(`stock token call ${functionName} is not permitted (only approve->router)`);
+    if (functionName === 'approve' && spenderOk(args[0])) return true;
+    throw new SignerGuardError(`stock token call ${functionName} is not permitted (only approve->router/curve/Permit2)`);
   }
 
   if (eq(to, ADDRESSES.UNISWAP_SWAP_ROUTER)) {
@@ -129,6 +148,78 @@ export function guard(tx, ctx) {
     return true;
   }
 
+  if (v2 && eq(to, v2Escrow)) {
+    // Withdraw what the escrow owes us. Two functions exist and nothing else.
+    const {functionName, args} = decodeSafely(V2_ESCROW_ABI, data);
+    if (functionName === 'claim') return true;
+    if (functionName === 'claimToken') { if (eq(args[0], zzyTokenAddress)) throw new SignerGuardError('claimToken($ZZY) would withdraw a vested buyback as $ZZY into a path that could sell it; refused'); return true; }
+    throw new SignerGuardError(`escrow call ${functionName} is not permitted (only claim/claimToken)`);
+  }
+
+  if (v2Curve && eq(to, v2Curve)) {
+    // The bonding curve. buy() is the buyback; sell() is a sale of $ZZY.
+    const {functionName, args} = decodeSafely(V2_CURVE_ABI, data);
+    if (functionName === 'sell') throw new SignerGuardError('curve.sell is a sale of $ZZY -- never signed');
+    if (functionName !== 'buy') throw new SignerGuardError(`curve call ${functionName} is not permitted (only buy)`);
+    const [quoteIn, minTokensOut, recipient] = args;
+    if (!ctx.recipient || !eq(recipient, ctx.recipient)) throw new SignerGuardError('curve buy recipient is not the operator wallet');
+    if (BigInt(quoteIn) <= 0n) throw new SignerGuardError('curve buy with quoteIn of 0');
+    if (BigInt(minTokensOut) <= 0n) throw new SignerGuardError('curve buy with minTokensOut of 0 -- unbounded price is never signed');
+    if (v2PairIsErc20 ? value !== 0n : value !== BigInt(quoteIn)) throw new SignerGuardError('curve buy value does not match the launch quote asset (native pays value == quoteIn, ERC-20 pays 0)');
+    return true;
+  }
+
+  if (eq(to, UNISWAP_V4.PERMIT2)) {
+    const {functionName, args} = decodeSafely(PERMIT2_ABI, data);
+    if (functionName !== 'approve') throw new SignerGuardError(`Permit2 call ${functionName} is not permitted (only approve)`);
+    const [token, spender] = args;
+    if (eq(token, zzyTokenAddress)) throw new SignerGuardError('Permit2 approve of $ZZY -- refused');
+    if (!eq(spender, UNISWAP_V4.UNIVERSAL_ROUTER)) throw new SignerGuardError('Permit2 approve to a spender other than the Universal Router');
+    return true;
+  }
+
+  if (eq(to, UNISWAP_V4.UNIVERSAL_ROUTER)) {
+    // One V4_SWAP command whose actions are exactly [SWAP_EXACT_IN_SINGLE,
+    // SETTLE_ALL, TAKE_ALL], with a minimum set, and the swap on one of the
+    // permitted legs: pair -> $ZZY on the Pons hook pool (the buyback), or
+    // USDG -> stock / stock -> USDG on a hookless pool (the book). Anything
+    // else in the calldata is refused.
+    const {functionName, args} = decodeSafely(UNIVERSAL_ROUTER_ABI, data);
+    if (functionName !== 'execute') throw new SignerGuardError(`universal router call ${functionName} is not permitted`);
+    const [commands, inputs] = args;
+    const cmdBytes = commands.slice(2);
+    if (cmdBytes.length !== 2 || parseInt(cmdBytes, 16) !== UR_COMMAND_V4_SWAP) throw new SignerGuardError('universal router: only a single V4_SWAP command is permitted');
+    if (inputs.length !== 1) throw new SignerGuardError('universal router: expected exactly one input');
+    let actions, params;
+    try { [actions, params] = decodeAbiParameters([{type: 'bytes'}, {type: 'bytes[]'}], inputs[0]); }
+    catch { throw new SignerGuardError('universal router: v4 input does not decode'); }
+    const want = [V4_ACTION.SWAP_EXACT_IN_SINGLE, V4_ACTION.SETTLE_ALL, V4_ACTION.TAKE_ALL].map(b => b.toString(16).padStart(2, '0')).join('');
+    if (actions.slice(2).toLowerCase() !== want || params.length !== 3) throw new SignerGuardError('universal router: actions must be exactly [SWAP_EXACT_IN_SINGLE, SETTLE_ALL, TAKE_ALL]');
+    let swap;
+    try {
+      [swap] = decodeAbiParameters(RH_V4_SWAP_EXACT_IN_SINGLE, params[0]);
+    } catch { throw new SignerGuardError('universal router: swap params do not decode'); }
+    const tokenIn = swap.zeroForOne ? swap.poolKey.currency0 : swap.poolKey.currency1;
+    const tokenOut = swap.zeroForOne ? swap.poolKey.currency1 : swap.poolKey.currency0;
+    if (eq(tokenIn, zzyTokenAddress)) throw new SignerGuardError('v4 swap has $ZZY as the input -- that is a sale');
+    const isStock = (a) => allowedStockTokens.some(x => eq(x, a));
+    const buyback = eq(tokenOut, zzyTokenAddress);
+    const bookLeg = (eq(tokenIn, ADDRESSES.USDG) && isStock(tokenOut)) || (isStock(tokenIn) && eq(tokenOut, ADDRESSES.USDG));
+    if (!buyback && !bookLeg) throw new SignerGuardError('v4 swap is not a permitted leg: pair -> $ZZY, USDG -> stock, or stock -> USDG');
+    if (buyback && !v2) throw new SignerGuardError('v4 buyback of $ZZY before the V2 launch is resolved -- refused');
+    if (buyback && !eq(swap.poolKey.hooks, PONS_V2.MEME_HOOK)) throw new SignerGuardError('v4 swap is not on the Pons hook pool');
+    const hookAllowed = eq(swap.poolKey.hooks, zeroAddress) || (ctx.allowedHooks ?? []).some(h => eq(h, swap.poolKey.hooks));
+    if (bookLeg && !hookAllowed) throw new SignerGuardError(`v4 stock swap on hook ${swap.poolKey.hooks} is not permitted (add it to uniswap.v4.allowedHooks after verifying it)`);
+    if (BigInt(swap.amountIn) <= 0n) throw new SignerGuardError('v4 swap with amountIn of 0');
+    if (BigInt(swap.amountOutMinimum) <= 0n) throw new SignerGuardError('v4 swap with amountOutMinimum of 0 -- unbounded slippage is never signed');
+    let takeCurrency;
+    try { [takeCurrency] = decodeAbiParameters([{type: 'address'}, {type: 'uint256'}], params[2]); } catch { throw new SignerGuardError('universal router: TAKE_ALL params do not decode'); }
+    if (!eq(takeCurrency, tokenOut)) throw new SignerGuardError('v4 TAKE_ALL currency is not the swap output');
+    const nativeIn = eq(tokenIn, zeroAddress);
+    if (nativeIn ? value !== BigInt(swap.amountIn) : value !== 0n) throw new SignerGuardError('v4 swap value does not match the input currency');
+    return true;
+  }
+
   throw new SignerGuardError('unreachable: destination passed allowlist but no rule matched');
 }
 
@@ -170,6 +261,7 @@ export function createGuardedSigner(config, env = process.env) {
     allowedStockTokens: config.runtime?.allowedStockTokens ?? [],
     maxValueWei: BigInt(config.execution?.maxTxValueWei ?? 0),
     routerVariant: config.uniswap?.routerVariant,
+    allowedHooks: config.uniswap?.v4?.allowedHooks ?? [],
     ponsLocker: config.pons?.locker ?? ADDRESSES.PONS_LOCKER,
     ponsClaimSelector: ponsClaimSelector(config),
     recipient: account.address,
@@ -177,6 +269,18 @@ export function createGuardedSigner(config, env = process.env) {
 
   return {
     account, address: account.address, live: true,
+    // The signer learns the launch's own curve and quote asset from the V2
+    // factory itself, not from the caller. Until this has run, every V2
+    // destination is refused. A V1 token leaves ctx.ponsV2 unset.
+    async resolvePonsV2(client) {
+      if (!ctx.zzyTokenAddress) return null;
+      try {
+        const launch = await readLaunch(client, ctx.zzyTokenAddress, config.pons?.v2?.factory);
+        if (!launch) { ctx.ponsV2 = null; return null; }
+        ctx.ponsV2 = {curve: launch.curve, pairToken: launch.native ? zeroAddress : launch.pairToken, escrow: config.pons?.v2?.escrow ?? PONS_V2.FEE_ESCROW, phase: launch.phase};
+        return ctx.ponsV2;
+      } catch { ctx.ponsV2 = null; return null; }
+    },
     async send(tx) {
       guard(tx, ctx); // throws before anything is signed
       return wallet.sendTransaction({to: tx.to, data: tx.data, value: tx.value ?? 0n});

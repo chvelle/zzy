@@ -8,8 +8,10 @@ import {refreshCatalog} from './catalog.mjs';
 import {writeSiteData} from './site-data.mjs';
 import {sessionAt} from './session.mjs';
 import {socialAfterTick} from './social.mjs';
+import {readLedger} from './treasury.mjs';
 import {pushSite, writeFeedFile} from './site-push.mjs';
 import {loadNotebook, liveEntries} from './notebook.mjs';
+import {fetchQuote} from './adapters/robinhood-rhj.mjs';
 import {paperConfig, paperState} from './paper.mjs';
 import {forkConfig, assertLocalFork, FORK_RPC} from './fork.mjs';
 
@@ -46,7 +48,7 @@ export class Runner {
     this.fork = fork;
     this.forkRpc = forkRpc;
     this.env = env;
-    this.deps = {publicClient, createGuardedSigner, loadCatalog, treasuryTick, tradingCycle, refreshCatalog, writeSiteData, ethUsd, socialAfterTick, ...deps};
+    this.deps = {publicClient, createGuardedSigner, loadCatalog, treasuryTick, tradingCycle, refreshCatalog, writeSiteData, ethUsd, socialAfterTick, fetchQuote, ...deps};
     this.cycleState = {};          // research cadence, carried between ticks
     this.catalogRefreshedAt = null;
     this.state = 'stopped';        // stopped | idle | ticking | paused
@@ -103,7 +105,27 @@ export class Runner {
     const problems = catalogProblems(this.catalog, this.config);
     if (problems.length) this.log(`catalog: ${problems.join(', ')}. Stock leg will reject everything until refreshed.`);
     this.config.runtime = {...this.config.runtime, allowedStockTokens: (this.catalog?.symbols ?? []).map(s => s.address).filter(Boolean)};
+    // The v3 router variant is read off the router's bytecode when the
+    // config does not name it, so a fresh install never has to run a
+    // verify step to be able to swap on v3.
+    if (!this.config.uniswap?.routerVariant && !this.paper) {
+      try {
+        const {detectRouterVariant} = await import('./preflight.mjs');
+        const d = await detectRouterVariant(this.client);
+        if (d.ok) { this.detectedRouterVariant = d.variant; this.config.uniswap = {...(this.config.uniswap ?? {}), routerVariant: d.variant}; this.log(`v3 router: ${d.detail}`); }
+        else this.log(`v3 router variant unknown (${d.detail}); v3 swaps stay refused, v4 is unaffected`);
+      } catch (e) { this.log(`v3 router variant not detected: ${e.message.split('\n')[0]}; v3 swaps stay refused, v4 is unaffected`); }
+    }
     this.signer = this.deps.createGuardedSigner(this.config, this.env);   // throws if live without the ack
+    // A Pons V2 token: the signer reads the launch's curve and quote asset
+    // from the factory so it can recognise (and bound) the V2 legs. A V1
+    // token leaves those destinations refused.
+    if (this.signer.live && this.signer.resolvePonsV2) {
+      try {
+        const v2 = await this.signer.resolvePonsV2(this.client);
+        if (v2) this.log(`pons v2 launch: curve ${v2.curve}, quote ${v2.pairToken === '0x0000000000000000000000000000000000000000' ? 'ETH' : v2.pairToken}, ${['on the curve', 'swept', 'trading on v4', 'rescued'][v2.phase] ?? v2.phase}`);
+      } catch (e) { this.log(`pons v2 lookup failed: ${e.message.split('\n')[0]}`); }
+    }
     this.state = 'paused';
     this.log(`ready in ${this.mode} mode${this.paper ? ' (paper)' : ''}${this.fork ? ' (local fork, fake money)' : ''}${this.signer.live ? (this.fork ? ', signing on the fork' : ', LIVE SIGNING ENABLED') : ', cannot sign'}`);
     return this.snapshot();
@@ -118,6 +140,7 @@ export class Runner {
     try {
       const config = await this.loadConfig();
       config.runtime = {...config.runtime, allowedStockTokens: this.config.runtime.allowedStockTokens};
+      if (!config.uniswap?.routerVariant && this.detectedRouterVariant) config.uniswap = {...(config.uniswap ?? {}), routerVariant: this.detectedRouterVariant};
       this.config = config;
       let price;
       try { price = await this.deps.ethUsd(); }
@@ -125,7 +148,9 @@ export class Runner {
 
       const out = {};
       if (!this.paper) {
-        try { out.treasury = await this.deps.treasuryTick({client: this.client, signer: this.signer, config, ethUsd: price, log}); if (!out.treasury?.skipped) log(`treasury: ${JSON.stringify(out.treasury)}`); }
+        // Re-read the launch each tick: it graduates from the curve to the v4 pool at some point, and the guard must follow.
+        if (this.signer.live && this.signer.resolvePonsV2) { try { await this.signer.resolvePonsV2(this.client); } catch {} }
+        try { out.treasury = await this.deps.treasuryTick({client: this.client, signer: this.signer, config, ethUsd: price, log, catalog: this.catalog, fetchQuote: this.deps.fetchQuote}); if (!out.treasury?.skipped) log(`treasury: ${JSON.stringify(out.treasury, (k, v) => typeof v === 'bigint' ? v.toString() : v)}`); }
         catch (e) { log(`treasury error: ${e.message}`); out.treasuryError = e.message; }
       }
       // The catalog is refreshed from Robinhood on a schedule so newly listed
@@ -167,7 +192,7 @@ export class Runner {
       if (!this.paper && !this.fork) {
         try {
           const nb = liveEntries(await loadNotebook(config), new Date());
-          out.social = await this.deps.socialAfterTick({out, site, notebook: nb, market: this.cycleState.lastMarket ?? null, session: this.cycleState.lastSession ?? null, config, env: this.env, log});
+          out.social = await this.deps.socialAfterTick({out, site, notebook: nb, market: this.cycleState.lastMarket ?? null, session: this.cycleState.lastSession ?? null, config, env: this.env, log, ledger: await readLedger(config).catch(() => null), tradesCount: site?.activity?.ordersExecuted ?? 0});
         } catch (e) { log(`social error: ${e.message}`); }
       }
       this.lastTickAt = new Date().toISOString();

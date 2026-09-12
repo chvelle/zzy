@@ -60,8 +60,9 @@ signature and refuses:
 - any swap with $ZZY as `tokenIn`, which is the never-sell invariant
 - any destination not on the allowlist (WETH, USDG, router, pons locker,
   catalog stock tokens)
-- any swap that is not one of four legs: WETH to $ZZY, WETH to USDG, USDG to
-  stock, stock to USDG. Cash can never be swapped out to ETH by the agent,
+- any swap that is not one of the permitted legs: WETH to $ZZY, WETH to
+  USDG, USDG to stock, stock to USDG (on v3 or, via the Universal Router, on
+  a hookless v4 pool), and the V2 buyback pair to $ZZY on the Pons hook pool. Cash can never be swapped out to ETH by the agent,
   and one stock is never swapped straight into another
 - any swap whose recipient is not the operator wallet, and any call where the
   recipient is not known at all

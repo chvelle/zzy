@@ -16,7 +16,33 @@ import {writeJsonAtomic} from './storage.mjs';
 //   2. Split proceeds 50/50 (treasury.mjs, rounding favours trading).
 //   3. Buy $ZZY with the buyback half. Hold. Never sell (signer enforces).
 //   4. Earmark the trading half; record everything to the ledger.
-export async function treasuryTick({client, signer, config, ethUsd, now = new Date(), log = () => {}}) {
+// Which Pons generation is the token? 'auto' asks the V2 factory once and
+// remembers; a token it does not know is treated as V1.
+const versionCache = new Map();
+export async function ponsVersion(client, config) {
+  const token = config.treasury?.zzyTokenAddress;
+  const forced = config.pons?.version;
+  if (forced === 'v1' || forced === 'v2') return forced;
+  if (!token) return 'v1';
+  const key = token.toLowerCase();
+  if (versionCache.has(key)) return versionCache.get(key);
+  const {isV2Launch} = await import('./adapters/pons-v2.mjs');
+  const v = (await isV2Launch(client, token, config.pons?.v2?.factory)) ? 'v2' : 'v1';
+  versionCache.set(key, v);
+  return v;
+}
+export function _resetPonsVersionCache() { versionCache.clear(); }
+
+export async function treasuryTick(args) {
+  const version = await ponsVersion(args.client, args.config);
+  if (version === 'v2') {
+    const {treasuryTickV2} = await import('./loop-v2.mjs');
+    return treasuryTickV2(args);
+  }
+  return treasuryTickV1(args);
+}
+
+export async function treasuryTickV1({client, signer, config, ethUsd, now = new Date(), log = () => {}}) {
   assertZzyDisposalBlocked('BUY');
   const zzy = config.treasury?.zzyTokenAddress;
   // Before the token exists there is nothing to claim or buy back. That is an

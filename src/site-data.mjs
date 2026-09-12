@@ -5,8 +5,9 @@ import path from 'node:path';
 import {readLedger, zzyHeldForever} from './treasury.mjs';
 import {loadCatalog, catalogProblems, listSymbols} from './catalog.mjs';
 import {deployable} from './profit.mjs';
-import {loadPositions, valuePositions} from './positions.mjs';
+import {loadPositions, valuePositions, countFills} from './positions.mjs';
 import {fetchQuote} from './adapters/robinhood-rhj.mjs';
+import {sessionAt} from './session.mjs';
 
 // Builds the JSON the public dashboard renders.
 //
@@ -34,11 +35,18 @@ async function readDecisions(dir = 'decisions') {
       const d = JSON.parse(await readFile(path.join(dir, f), 'utf8'));
       out.push({
         at: d.generatedAt,
+        generatedAt: d.generatedAt,
         symbol: d.asset?.symbol ?? null,
+        asset: {symbol: d.asset?.symbol ?? null},
         decision: d.decision,
         confidence: d.confidence,
         source: d.decisionSource ?? 'heuristic',
-        rationale: (d.rationale ?? d.summary ?? '').slice(0, 240),
+        rationale: (d.rationale ?? d.summary ?? '').slice(0, 1500),
+        downsideCase: typeof d.downsideCase === 'string' ? d.downsideCase.slice(0, 600) : null,
+        falsifier: typeof d.falsifier === 'string' ? d.falsifier.slice(0, 400) : null,
+        targetWeightPercent: d.targetWeightPercent ?? null,
+        replacedBy: d.replacedBy ?? null,
+        sources: Array.isArray(d.sources) ? d.sources.filter(u => typeof u === 'string' && /^https?:\/\//.test(u)).slice(0, 5) : [],
         sample: Boolean(d.sample),
       });
     } catch { /* skip unreadable decision file */ }
@@ -97,6 +105,9 @@ export async function buildSiteData(config, {now = new Date(), wallet = null, qu
       name: config.agentName ?? 'ZZY',
       mode: config.mode ?? 'preview',
       live: config.mode === 'live',
+      session: (() => { const x = sessionAt(now); return {phase: x.phase, description: x.description, hoursToOpen: x.hoursToOpen}; })(),
+      posture: config.research?.posture ?? 'balanced',
+      reviewCadence: {regular: config.research?.intervalSeconds ?? 300, extended: config.research?.intervalSecondsExtended ?? 900, closed: config.research?.intervalSecondsClosed ?? 3600},
       chain: 'Robinhood Chain',
       chainId: config.chain?.id ?? 4663,
       // The operator wallet is deliberately NOT published. It is discoverable
@@ -163,8 +174,8 @@ export async function buildSiteData(config, {now = new Date(), wallet = null, qu
     },
     activity: {
       decisionsLogged: real.length,
-      ordersExecuted: executed.length,
-      recent: real.slice(0, 14),
+      ordersExecuted: countFills(store),
+      recent: real.slice(0, 60),
     },
     site: {pollSeconds: site.pollSeconds ?? 15},
   };

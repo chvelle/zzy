@@ -411,3 +411,7 @@ Run `npm test` and `npm run release:check` before a pull request. The second ref
 ## License
 
 MIT. The original ZZY skeleton is Ozzy's; check the license on [MEADGod/ZZY](https://github.com/MEADGod/ZZY) for the terms that apply to what came from there.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md). Current version: 0.4.0.

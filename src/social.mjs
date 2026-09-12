@@ -41,6 +41,17 @@ export const DEFAULT_SOCIAL = {
   // loss, a down day, a downbeat thought: not posted. Never dressed up
   // either: the dashboard is the full record and the account links to it.
   postBearish: false,
+  // Routine treasury events are quiet; the moments are loud. Claims and
+  // buybacks post only the first time and when a running total crosses a
+  // line. Trades always post: that is the job, and the job is the story.
+  postClaims: false,
+  postBuybacks: false,
+  milestones: {
+    zzyHeldUsd: [500, 1000, 2500, 5000, 10000, 25000, 50000, 100000],
+    feesClaimedUsd: [500, 1000, 2500, 5000, 10000, 25000, 50000, 100000],
+    profitUsd: [100, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000],
+    trades: [1, 10, 50, 100, 250, 500, 1000],
+  },
   creator: 'Ozzy, also known as MeadGod, the creator of Pons',            // thoughts and review notes, when nothing happened, at most this often
   dailyReportHourUtc: 21,       // one state-of-the-book post a day, after the US close
   logPath: 'data/social-log.json',
@@ -97,7 +108,7 @@ export function scanPost(text, cfg = DEFAULT_SOCIAL) {
 }
 
 // ── the persona ───────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You write posts for ZZY's own account on X. ZZY is an autonomous agent that runs a small portfolio of tokenized stocks on Robinhood Chain and is paid by creator fees from its own token, $ZZY. It holds half of every fee in $ZZY forever and trades the other half. It has no brokerage account; everything it does is onchain.
+const SYSTEM_PROMPT = `You write posts for ZZY's own account on X. ZZY is an autonomous agent that runs a small portfolio of tokenized stocks on Robinhood Chain and is paid by creator fees from its own token, $ZZY. It buys back $ZZY with half of every fee and burns it; the other half it trades. It has no brokerage account; everything it does is onchain.
 
 Origin. ZZY was created by {{CREATOR}}. That is part of who it is, and it says so the way a person mentions who raised them: in the introduction, in the daily report, and now and then when it fits, in its own dry register. Never as a plug, never every post, never with an @mention.
 
@@ -107,6 +118,7 @@ Form. One post, under ${DEFAULT_SOCIAL.maxChars} characters. Sentence case. Plai
 
 Hard rules.
 - Everything factual in the post must come from the EVENT object you are given. You may not add a number, a price, a name, a date, a gain or a loss that is not in it. If the event is thin, say less.
+- Event kinds: buy, close, trim, rotation (a close that funded a buy), claim (creator fees claimed; buybackUsd bought $ZZY to be burned, tradingUsd went into the book; buybackParkedUsd means that half is set aside and will be bought shortly), buyback (a parked buyback that has now gone through), milestone (a running total crossed a line: what says which, threshold the line, the other field the actual figure; a first-claim or first-buyback milestone is exactly that), review, daily, musing. A claim, a buyback or a milestone is never bad news. A milestone post notes the fact in its own dry way; it does not celebrate, and it does not count what it has not done.
 - Never say or imply anyone should buy $ZZY or anything else. Never predict a price. Never promise. Never call anything a guarantee, an opportunity, or advice.
 - Never mention wallet addresses, keys, the operator, or the model behind you.
 - Never reproduce anyone else's writing.
@@ -164,7 +176,15 @@ export function eventsFromTick(out, {now = new Date()} = {}) {
   for (const b of buys) if (!b.used) evs.push(b);
   const tr = out.treasury ?? {};
   if (tr.acted && (tr.buyTxHash || tr.claimTxHash)) {
-    evs.push({key: `claim:${tr.buyTxHash ?? tr.claimTxHash}`, kind: 'claim', claimedUsd: round(tr.claimUsd ?? tr.proceedsUsd), buybackUsd: round(tr.buybackUsd), tradingUsd: round(tr.tradingUsd), at: now.toISOString()});
+    const ev = {key: `claim:${tr.buyTxHash ?? tr.claimTxHash}`, kind: 'claim', claimedUsd: round(tr.claimUsd ?? tr.proceedsUsd), buybackUsd: round(tr.buybackUsd), tradingUsd: round(tr.tradingUsd), at: now.toISOString()};
+    // A buyback that could not run this tick is parked and retried, not lost;
+    // the event says so, so the composer does not read "bought $0" as a loss.
+    if (tr.buybackDeferredUsd > 0) { ev.buybackParkedUsd = round(tr.buybackDeferredUsd); delete ev.buybackUsd; }
+    evs.push(ev);
+  }
+  // A parked buyback that finally went through is its own settled event.
+  if (tr.acted && tr.deferredBuyTxHash) {
+    evs.push({key: `buyback:${tr.deferredBuyTxHash}`, kind: 'buyback', boughtUsd: round(tr.deferredBuybackUsd), venue: tr.deferredBuybackVenue ?? null, at: now.toISOString()});
   }
   // The review's own words are worth posting only when the review did not
   // produce a trade (the trade post says it better) and only as a soft
@@ -239,10 +259,36 @@ export function isBearish(ev, site = null) {
 
 const BEARISH_WORDS = /\b(loss|losses|lost|losing|down day|drawdown|bearish|bleed|bleeding|dump|dumped|crash|crashed|tanked|plunge|plunged|sold off|selloff|sell-off|underwater|red day|in the red)\b/i;
 
-export async function socialAfterTick({out, site = null, notebook = [], market = null, session = null, config, env = process.env, now = new Date(), log = () => {}, fetchImpl = fetch}) {
+// Milestones: computed from the ledger's running totals, keyed so each line
+// is crossed once. The first claim and the first buyback are milestones in
+// themselves. Everything here is a settled, non-losing fact.
+export function milestoneEvents({ledger, tradesCount = 0, cfg, now = new Date()}) {
+  const evs = [];
+  if (!ledger?.entries) return evs;
+  const claims = ledger.entries.filter(e => e.type === 'fee-claim');
+  const feesUsd = claims.reduce((s, e) => s + (e.claimUsd ?? 0), 0);
+  const zzyUsd = claims.reduce((s, e) => s + (e.buybackUsd ?? 0), 0) + ledger.entries.filter(e => e.type === 'buyback-settled').reduce((s, e) => s + (e.usd ?? 0), 0);
+  const profitUsd = ledger.entries.filter(e => e.type === 'realized-pnl').reduce((s, e) => s + (e.amountUsd ?? 0), 0);
+  const at = now.toISOString();
+  if (claims.length >= 1) evs.push({key: 'milestone:first-claim', kind: 'milestone', what: 'first fees claimed', claimedUsd: round(claims[0].claimUsd), at});
+  if (zzyUsd > 0) evs.push({key: 'milestone:first-buyback', kind: 'milestone', what: 'first $ZZY bought back and burned', zzyBurnedUsd: round(zzyUsd), at});
+  const ladder = (name, value, steps, field) => {
+    for (const step of steps ?? []) if (value >= step) evs.push({key: `milestone:${name}:${step}`, kind: 'milestone', what: name, threshold: step, [field]: round(value), at});
+  };
+  ladder('$ZZY bought back and burned, lifetime', zzyUsd, cfg.milestones?.zzyHeldUsd ?? cfg.milestones?.zzyBurnedUsd, 'zzyBurnedUsd');
+  ladder('creator fees claimed, lifetime', feesUsd, cfg.milestones?.feesClaimedUsd, 'feesClaimedUsd');
+  ladder('realized profit, lifetime', profitUsd, cfg.milestones?.profitUsd, 'profitUsd');
+  ladder('trades completed', tradesCount, cfg.milestones?.trades, 'trades');
+  return evs;
+}
+
+export async function socialAfterTick({out, site = null, notebook = [], market = null, session = null, config, env = process.env, now = new Date(), log = () => {}, fetchImpl = fetch, ledger = null, tradesCount = 0}) {
   const cfg = socialConfig(config);
   if (config._paper || config._fork) return {skipped: 'simulated run'};
-  let hard = eventsFromTick(out, {now}).filter(e => !e.soft);
+  let hard = eventsFromTick(out, {now}).filter(e => !e.soft)
+    .filter(e => (e.kind !== 'claim' || cfg.postClaims) && (e.kind !== 'buyback' || cfg.postBuybacks));
+  // milestones from the ledger; ones already posted are dropped by the dedup in canPost
+  if (ledger) hard = [...hard, ...milestoneEvents({ledger, tradesCount, cfg, now})];
   let soft = [...eventsFromTick(out, {now}).filter(e => e.soft), dailyEvent(site, now), musingEvent({notebook, market, session}, now)].filter(Boolean);
   if (!cfg.postBearish) {
     const keep = (e) => { const why = isBearish(e, site); if (why) log(`social: not posting ${e.kind}${e.symbol ? ' ' + e.symbol : ''} (${why})`); return !why; };
@@ -255,11 +301,17 @@ export async function socialAfterTick({out, site = null, notebook = [], market =
   const done = [];
   for (const ev of queue) {
     const why = canPost(slog, ev, cfg, now);
-    if (why) { if (!ev.soft) log(`social: holding ${ev.kind} ${ev.symbol ?? ''}: ${why}`); continue; }
+    if (why) { if (!ev.soft && why !== 'already posted') log(`social: holding ${ev.kind} ${ev.symbol ?? ''}: ${why}`); continue; }
     let text;
     try { text = await composePost(ev, config, {env, fetchImpl}); }
     catch (e) { log(`social: could not compose ${ev.kind}: ${e.message}`); continue; }
     if (!cfg.postBearish) {
+      const settledGood = ['buy', 'claim', 'buyback', 'rotation', 'milestone'].includes(ev.kind) || (['close', 'trim'].includes(ev.kind) && (ev.realizedUsd ?? 0) >= 0);
+      if (/^skip\.?$/i.test(text.trim()) && settledGood) {
+        // A settled, non-losing event is never bad news. Ask once more, saying so.
+        try { text = await composePost({...ev, note: `${ev.note ? ev.note + ' ' : ''}This is a settled event with no loss in it. Write it plainly; SKIP is not an option here.`}, config, {env, fetchImpl}); }
+        catch (e) { log(`social: could not compose ${ev.kind}: ${e.message}`); continue; }
+      }
       if (/^skip\.?$/i.test(text.trim())) { log(`social: composer skipped ${ev.kind} as downbeat`); continue; }
       if (BEARISH_WORDS.test(text)) { log(`social: not posting ${ev.kind}, reads bearish: ${text.slice(0, 80)}`); continue; }
     }

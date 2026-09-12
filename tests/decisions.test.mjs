@@ -29,7 +29,7 @@ test('a review is written as one file per name, and the public exporter reads it
       const syms = d.activity.recent.map(e => e.symbol);
       assert.ok(syms.includes('NVDA') && syms.includes('TSLA') && syms.includes('AMD'));
       assert.equal(d.activity.decisionsLogged, 4);
-      assert.equal(d.activity.ordersExecuted, 1, 'one PREPARE');
+      assert.equal(d.activity.ordersExecuted, 0, 'a PREPARE verdict is not an order; only a settled fill counts');
     } finally { process.chdir(cwd); }
   } finally { await rm(dir, {recursive: true}); }
 });
